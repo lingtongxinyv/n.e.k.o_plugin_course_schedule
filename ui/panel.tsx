@@ -3,15 +3,14 @@
   Card,
   Grid,
   Stack,
+  Inline,
   Text,
   Alert,
   StatCard,
-  StatusBadge,
   Button,
   Field,
   Input,
   Select,
-  Switch,
   RefreshButton,
   DataTable,
   Divider,
@@ -100,7 +99,6 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
   const [homework, setHomework] = useState<Homework[]>([])
   const [exams, setExams] = useState<Exam[]>([])
   const [countdown, setCountdown] = useState<Countdown | null>(null)
-  const [todayInfo, setTodayInfo] = useState<any>({})
 
   // === 新增：教务系统导入 ===
   const [adapters, setAdapters] = useState<{ id: string; name: string }[]>([])
@@ -175,7 +173,6 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
           callEntry("list_exams"),
           callEntry("get_countdown"),
         ])
-        setTodayInfo(today)
         setTodaySessions(today.sessions || [])
         setWeekDays(week.days || [])
         setCourses(cs.courses || [])
@@ -199,7 +196,6 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
 
   useEffect(() => {
     refreshAll()
-    // 加载可用教务适配器
     callEntry("list_academic_adapters").then((r: any) => {
       setAdapters(r.adapters || [])
       if ((r.adapters || []).length > 0) {
@@ -379,14 +375,14 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
     return (
       <Grid cols={7}>
         {weekDays.map((day, i) => (
-          <Card key={i} title={WEEKDAYS[i] || `Day${i}`} subtitle={day.date}>
+          <Card key={i} title={WEEKDAYS[i] || `Day${i}`}>
             <Stack gap="xs">
+              <Text>{day.date}</Text>
               {day.count > 0 ? (
-                <Text tone="success" size="sm">{day.count} 节课</Text>
+                <Text>{day.count} 节课</Text>
               ) : (
-                <Text tone="muted" size="sm">无课</Text>
+                <Text>无课</Text>
               )}
-              <Text size="xs" tone="muted">{day.summary?.split("\n").slice(1).join(" · ")}</Text>
             </Stack>
           </Card>
         ))}
@@ -396,7 +392,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
 
   return (
     <Page title="课程表" subtitle={activeSem ? `${activeSem.name} · 第 ${countdown?.week || "?"}/${activeSem.total_weeks} 周` : "请先创建学期"}>
-      <Stack>
+      <Stack gap="md">
         <Grid cols={4}>
           <StatCard label="今日课程" value={todaySessions.length} />
           <StatCard label="待完成作业" value={homework.filter((h) => h.done === 0).length} />
@@ -407,7 +403,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
           />
         </Grid>
 
-        <RefreshButton onClick={refreshAll} loading={loading} label="刷新" />
+        <RefreshButton onRefresh={refreshAll} label={loading ? "刷新中..." : "刷新"} />
 
         {!activeSem ? (
           <Alert tone="warning">还没有学期，请在下方创建一个学期</Alert>
@@ -419,15 +415,15 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
             <Stack gap="xs">
               {todaySessions.map((s, i) => (
                 <Grid key={i} cols={4}>
-                  <Text size="sm">第{s.period_no}节</Text>
-                  <Text size="sm" tone="bold">{s.name}</Text>
-                  <Text size="sm" tone="muted">{s.location || "-"}</Text>
-                  <Text size="sm" tone="muted">{s.teacher || "-"}</Text>
+                  <Text>第{s.period_no}节</Text>
+                  <Text>{s.name}</Text>
+                  <Text>{s.location || "-"}</Text>
+                  <Text>{s.teacher || "-"}</Text>
                 </Grid>
               ))}
             </Stack>
           ) : (
-            <Text tone="muted">今天无课</Text>
+            <Text>今天无课</Text>
           )}
         </Card>
 
@@ -445,7 +441,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
 
         {/* 学期管理 */}
         <Card title="学期管理">
-          <Stack>
+          <Stack gap="md">
             {semesters.length > 0 ? (
               <DataTable
                 columns={[
@@ -455,11 +451,11 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
                   { key: "total_weeks", label: "周数" },
                   { key: "is_active", label: "状态" },
                 ]}
-                rows={semesters.map((s) => ({
+                data={semesters.map((s) => ({
                   ...s,
                   is_active: s.is_active ? "当前" : "—",
                   _actions: (
-                    <Button size="sm" tone="primary" onClick={() => switchSemester(s.id)} disabled={!!s.is_active}>
+                    <Button tone="primary" onClick={() => switchSemester(s.id)} disabled={!!s.is_active}>
                       切换
                     </Button>
                   ),
@@ -485,10 +481,10 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
           </Stack>
         </Card>
 
-        {/* ========== 新增：快速上手指引 ========== */}
+        {/* ========== 快速上手指引 ========== */}
         <Card title="快速上手指引">
           <Stack gap="xs">
-            <Button tone="primary" onClick={() => setGuideOpen((v) => !v)}>
+            <Button tone="primary" onClick={() => { setGuideOpen((v) => !v) }}>
               {guideOpen ? "收起指引" : "展开指引"}
             </Button>
             {guideOpen ? (
@@ -496,36 +492,24 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
                 <Alert tone="info">
                   按这 3 步完成初始化。最简单的方式是一键从教务系统导入。
                 </Alert>
-                <Text tone="bold">1. 创建学期</Text>
-                <Text tone="muted" size="sm">
-                  在上方「学期管理」填写学期名（如 2025秋季）、开始 / 结束日期，点「添加学期」。
-                </Text>
-                <Text tone="bold">2. 添加课程（两种方式任选）</Text>
-                <Text tone="muted" size="sm">
-                  A. 一键教务导入：填教务系统地址（或学校代码）+ 学号密码 → 自动拉取全部课程。
-                </Text>
-                <Text tone="muted" size="sm">
-                  B. 表格粘贴导入：从教务系统复制课程表格 → 粘贴到下方文本框 → 一键导入。
-                </Text>
-                <Text tone="muted" size="sm">
-                  C. 手动录入：在下方「添加课程」逐门填写课程名、教师、地点、周几第几节。
-                </Text>
-                <Text tone="bold">3. 作业 / 考试 / 提醒（可选）</Text>
-                <Text tone="muted" size="sm">
-                  添加完课程后，在下方「作业管理」「考试管理」里添加。上课提醒需在 plugin.toml 的 [course] 段把 remind_enabled 设为 true。
-                </Text>
+                <Text>1. 创建学期</Text>
+                <Text>在上方「学期管理」填写学期名（如 2025秋季）、开始 / 结束日期，点「添加学期」。</Text>
+                <Text>2. 添加课程（三种方式任选）</Text>
+                <Text>A. 一键教务导入：填教务系统地址 + 学号密码 → 自动拉取全部课程。</Text>
+                <Text>B. 表格粘贴导入：从教务系统复制课程表格 → 粘贴到下方文本框 → 一键导入。</Text>
+                <Text>C. 手动录入：在下方「添加课程」逐门填写课程名、教师、地点、周几第几节。</Text>
+                <Text>3. 作业 / 考试 / 提醒（可选）</Text>
+                <Text>添加完课程后，在下方「作业管理」「考试管理」里添加。上课提醒需在 plugin.toml 的 [course] 段把 remind_enabled 设为 true。</Text>
                 <Divider />
-                <Text tone="muted" size="sm">
-                  更多说明见 docs/guide.md，或直接向 AI 询问课程表相关问题。
-                </Text>
+                <Text>更多说明见 docs/guide.md，或直接向 AI 询问课程表相关问题。</Text>
               </Stack>
             ) : (
-              <Text tone="muted" size="sm">创建学期 → 一键教务 / 表格导入 / 手动录入 → 完成</Text>
+              <Text>创建学期 → 一键教务 / 表格导入 / 手动录入 → 完成</Text>
             )}
           </Stack>
         </Card>
 
-        {/* ========== 新增：一键从教务系统导入 ========== */}
+        {/* ========== 一键从教务系统导入 ========== */}
         <Card title="一键从教务系统导入">
           <Stack gap="xs">
             {adapters.length === 0 ? (
@@ -533,7 +517,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
                 未检测到可用的教务适配器。请确认插件已完整加载。
               </Alert>
             ) : (
-              <Text tone="muted" size="sm">
+              <Text>
                 可用适配器：{adapters.map((a) => a.name).join("、")}
               </Text>
             )}
@@ -606,10 +590,10 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
           </Stack>
         </Card>
 
-        {/* ========== 新增：表格粘贴导入（CSV） ========== */}
+        {/* ========== 表格粘贴导入（CSV） ========== */}
         <Card title="表格粘贴导入">
           <Stack gap="xs">
-            <Text tone="muted" size="sm">
+            <Text>
               从教务系统或 Excel 复制课程表格内容，粘贴到下方文本框。支持 CSV 或制表符分隔。
               每行格式：课程名, 教师, 地点, 周几(1-7), 节次(如 1-2)
             </Text>
@@ -674,7 +658,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
                 { key: "teacher", label: "教师" },
                 { key: "location", label: "地点" },
               ]}
-              rows={courses}
+              data={courses}
             />
           </Card>
         ) : null}
@@ -709,16 +693,16 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
                   { key: "due_at", label: "截止" },
                   { key: "done", label: "状态" },
                 ]}
-                rows={homework.map((h) => ({
+                data={homework.map((h) => ({
                   ...h,
                   done: h.done === 1 ? "已完成" : h.overdue ? "逾期" : "待完成",
                   _actions: (
-                    <Stack direction="inline" gap="xs">
-                      <Button size="sm" tone="primary" onClick={() => toggleHomework(h)}>
+                    <Inline gap="xs">
+                      <Button tone="primary" onClick={() => toggleHomework(h)}>
                         {h.done === 1 ? "取消" : "完成"}
                       </Button>
-                      <Button size="sm" tone="danger" onClick={() => deleteHomework(h)}>删除</Button>
-                    </Stack>
+                      <Button tone="danger" onClick={() => deleteHomework(h)}>删除</Button>
+                    </Inline>
                   ),
                 }))}
               />
@@ -759,10 +743,10 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
                   { key: "due_at", label: "日期" },
                   { key: "location", label: "考场" },
                 ]}
-                rows={exams.map((e) => ({
+                data={exams.map((e) => ({
                   ...e,
                   _actions: (
-                    <Button size="sm" tone="danger" onClick={() => deleteExam(e)}>删除</Button>
+                    <Button tone="danger" onClick={() => deleteExam(e)}>删除</Button>
                   ),
                 }))}
               />
