@@ -391,9 +391,9 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
 
         {/* 使用教程 */}
         <Card title="快速上手指引">
-          <Stack gap="md">
-            <Button size="sm" tone="primary" onClick={() => setGuideOpen((v) => !v)}>
-              {guideOpen ? "▼ 收起教程" : "▶ 展开教程"}
+          <Stack>
+            <Button tone="primary" onClick={() => setGuideOpen((v) => !v)}>
+              {guideOpen ? "收起教程" : "展开教程"}
             </Button>
             {guideOpen ? (
               <Stack gap="md">
@@ -507,10 +507,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
         </Card>
 
         {/* 一键从教务系统导入 */}
-        <Card
-          title="🚀 一键从教务系统导入"
-          subtitle="最快的初始化方式 — 填账号密码即可拉取全部课程"
-        >
+        <Card title="一键从教务系统导入">
           <Stack>
             {adapters.length === 0 ? (
               <Alert tone="warning">
@@ -580,10 +577,9 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
             <Button
               tone="primary"
               onClick={doImportAcademic}
-              loading={importLoading}
               disabled={importLoading || adapters.length === 0}
             >
-              {importLoading ? "导入中…" : "🚀 一键导入"}
+              {importLoading ? "导入中..." : "一键从教务系统导入"}
             </Button>
             <Alert tone="info">
               导入时将自动创建 / 更新课程与课时。学号密码仅在本次请求中使用，不会被保存。
