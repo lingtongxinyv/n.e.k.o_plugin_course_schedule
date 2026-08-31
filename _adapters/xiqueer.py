@@ -179,10 +179,12 @@ class XiQueErAdapter(AcademicAdapter):
         """同步登录（由 run_in_executor 调用，避免阻塞事件循环）。"""
         T = 5  # 极限：宿主 entry 硬限 30s，登录 + 抓课共享这个时间
         s = _HttpSession()
+        print(f"[xiqueer.login] START base={base_url} user={username}", flush=True)
 
         # 1) 登录页面
         login_page_url = f"{base_url}/cas/login.action"
         r = s.get(login_page_url, timeout=T)
+        print(f"[xiqueer.login] login_page status={r.status_code} cookies={[c.name for c in s.cookie_jar]}", flush=True)
         if r.status_code != 200:
             raise AcademicAdapterError(
                 f"无法访问教务系统登录页：HTTP {r.status_code}。"
@@ -275,6 +277,7 @@ class XiQueErAdapter(AcademicAdapter):
             "X-Requested-With": "XMLHttpRequest",
         }
         r = s.post(f"{base_url}/cas/logon.action", data=post_body, headers=headers, timeout=T)
+        print(f"[xiqueer.login] logon status={r.status_code} resp={r.text[:200]!r}", flush=True)
         try:
             result = r.json()
         except Exception:
@@ -286,6 +289,7 @@ class XiQueErAdapter(AcademicAdapter):
             raise AcademicAdapterError(
                 f"登录失败：{result.get('message', '未知错误')} (code={result.get('status')})"
             )
+        print(f"[xiqueer.login] SUCCESS! cookies_after={[c.name for c in s.cookie_jar]}", flush=True)
 
         return s, username
 
@@ -345,8 +349,8 @@ class XiQueErAdapter(AcademicAdapter):
         return await loop.run_in_executor(None, self._do_fetch_courses_sync, semester_info)
 
     def _do_fetch_courses_sync(self, semester_info: dict) -> list[dict]:
-        """同步抓课：严格控制在 ~16s（4 次尝试 × 4s timeout），宿主 entry 硬限 30s。"""
-        T = 4
+        """同步抓课：先试 JSON API，失败直接上 HTML 课表页面（喜鹊儿标准版）。"""
+        T = 5  # 单次 timeout
 
         username = self._username
         sy = semester_info.get("school_year", "")
@@ -356,59 +360,83 @@ class XiQueErAdapter(AcademicAdapter):
         except Exception:
             next_sy = sy
 
-        # KingoSOFT 喜鹊儿标准版：xnxq 格式 "2025-2026-1"，URL /xskbcx!getKbxxByXs
-        xnxq = f"{sy}-{next_sy}-{term}"  # 最可能命中的跨学年格式
-        api_url = f"{self.base_url}/xskbcx!getKbxxByXs"
-        common_query = "jsxx,jc,jc2,cd,zc,dwmc,xnxqm,xsksxm,xsdm,xsm,xxm,xjx,xsks,pym,zb,zs"
+        xnxq = f"{sy}-{next_sy}-{term}"  # 2025-2026-1
+        print(f"[xiqueer.fetch] base={self.base_url} username={username} xnxq={xnxq}", flush=True)
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept": "*/*",
             "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self.base_url}/cas/index.action",
         }
 
-        # 4 次尝试（按命中概率排序）
-        attempts = [
-            ("GET",  api_url, {"query.xnxq": xnxq, "query.xsh": username, "query.kbzc": common_query}),
-            ("GET",  f"{self.base_url}/xskbcx/getKbxxByXs.action", {"query.xnxq": xnxq, "query.xsh": username, "query.kbzc": common_query}),
-            ("POST", api_url, {"query.xnxq": xnxq, "query.xsh": username, "query.kbzc": common_query}),
-            ("GET",  api_url, {"query.xnxq": f"{sy}-{term}", "query.xsh": username, "query.kbzc": common_query}),
-        ]
-
-        for method, url, params in attempts:
+        # ---- 1. 先试 JSON API（2 次，最快判断登录态） ----
+        api_url = f"{self.base_url}/xskbcx!getKbxxByXs"
+        common_query = "jsxx,jc,jc2,cd,zc,dwmc,xnxqm,xsksxm,xsdm,xsm,xxm,xjx,xsks,pym,zb,zs"
+        for method, params in [
+            ("GET", {"query.xnxq": xnxq, "query.xsh": username, "query.kbzc": common_query}),
+            ("POST", {"query.xnxq": xnxq, "query.xsh": username, "query.kbzc": common_query}),
+        ]:
             qs = urllib.parse.urlencode(params)
             try:
-                if method == "GET":
-                    r = self._session.get(f"{url}?{qs}", headers=headers, timeout=T)
-                else:
-                    r = self._session.post(url, data=qs, headers=headers, timeout=T)
-                if r.status_code != 200:
-                    continue
+                url = f"{api_url}?{qs}" if method == "GET" else api_url
+                data = qs if method == "POST" else None
+                r = self._session.get(url, data=data, headers=headers, timeout=T) \
+                    if method == "GET" else \
+                    self._session.post(api_url, data=qs, headers=headers, timeout=T)
                 text = r.text.strip()
-                if ("凭证已失效" in text
-                        or "无效访问请求" in text[:500]
-                        or ("登录" in text[:300] and ("失效" in text or "错误" in text))):
-                    continue
+                print(f"[xiqueer.fetch] JSON-API {method} status={r.status_code} "
+                      f"first200={text[:200]!r}", flush=True)
+                if r.status_code == 200 and "凭证已失效" not in text and "无效访问请求" not in text[:500]:
+                    try:
+                        raw = r.json()
+                    except Exception:
+                        raw = None
+                    if raw:
+                        courses = self._parse_course_payload(raw)
+                        if courses:
+                            print(f"[xiqueer.fetch] JSON-API SUCCESS! {len(courses)} courses", flush=True)
+                            return courses
+            except Exception as e:
+                print(f"[xiqueer.fetch] JSON-API {method} EXC={e}", flush=True)
 
-                # JSON 优先，HTML 兜底
+        # ---- 2. 直接上 HTML 课表页面（喜鹊儿标准版路径 /student/wsxk.xskcb10319.jsp） ----
+        html_urls = [
+            f"{self.base_url}/student/wsxk.xskcb10319.jsp",
+            f"{self.base_url}/cas/student/wsxk.xskcb10319.jsp",
+            f"{self.base_url}/student/xskbcx!xsKbView.action",
+            f"{self.base_url}/znpk/Pri_StuSel.aspx",
+        ]
+        for hu in html_urls:
+            for params in [
+                {"xn": sy, "xq": term, "xh": username, "xsh": username, "xnxq": xnxq},
+                {"xn": sy, "xq": term, "xh": username},
+            ]:
                 try:
-                    raw = r.json()
-                except Exception:
-                    courses = self._parse_kb_html(text)
-                    if courses:
-                        return courses
+                    qs = urllib.parse.urlencode({k: v for k, v in params.items() if v})
+                    r = self._session.get(f"{hu}?{qs}", headers={
+                        "User-Agent": headers["User-Agent"],
+                        "Accept": "text/html,*/*",
+                        "Referer": f"{self.base_url}/cas/index.action",
+                    }, timeout=T)
+                    text = r.text
+                    print(f"[xiqueer.fetch] HTML {hu.split('/')[-1]} status={r.status_code} "
+                          f"len={len(text)} first300={text[:300]!r}", flush=True)
+                    if (r.status_code == 200 and len(text) > 2000
+                            and "登录" not in text[:300]
+                            and "凭证已失效" not in text[:300]
+                            and "无效访问请求" not in text[:500]):
+                        courses = self._parse_kb_html(text)
+                        if courses:
+                            print(f"[xiqueer.fetch] HTML SUCCESS! {len(courses)} courses", flush=True)
+                            return courses
+                except Exception as e:
+                    print(f"[xiqueer.fetch] HTML EXC={e}", flush=True)
                     continue
-
-                courses = self._parse_course_payload(raw)
-                if courses:
-                    return courses
-            except Exception:
-                continue
 
         raise AcademicAdapterError(
-            "课表 API 未返回有效数据。"
-            "请确认学号密码正确，登录成功后再试。"
+            "课表 API 和 HTML 页面均未返回有效数据。"
+            "请查看日志面板中 [xiqueer.fetch] 开头的调试信息，"
+            "或将教务系统地址发给开发者分析。"
         )
 
     # ---- _parse_course_payload ---------------------------------------------
