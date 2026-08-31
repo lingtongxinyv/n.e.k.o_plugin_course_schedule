@@ -1,4 +1,4 @@
-import {
+﻿import {
   Page,
   Card,
   Grid,
@@ -102,7 +102,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
   const [countdown, setCountdown] = useState<Countdown | null>(null)
   const [todayInfo, setTodayInfo] = useState<any>({})
 
-  // 教务系统导入
+  // === 新增：教务系统导入 ===
   const [adapters, setAdapters] = useState<{ id: string; name: string }[]>([])
   const [importLoading, setImportLoading] = useState(false)
   const [guideOpen, setGuideOpen] = useState(false)
@@ -116,6 +116,10 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
     semester_keyword: "",
     semester_id: "",
   })
+
+  // === 新增：CSV / 文本导入 ===
+  const [csvText, setCsvText] = useState("")
+  const [csvLoading, setCsvLoading] = useState(false)
 
   const semForm = useForm({
     name: "",
@@ -204,11 +208,11 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
     }).catch(() => {})
   }, [])
 
+  // === 教务系统导入函数 ===
   async function doImportAcademic() {
     const f = importForm.values
     if (!f.adapter) { toast.error("请选择教务适配器"); return }
     if (!f.username || !f.password) { toast.error("请填写学号和密码"); return }
-    // base_url 和 school_code 至少要有一个
     if (!f.base_url && !f.school_code) { toast.error("请填写教务系统地址或学校代码"); return }
     setImportLoading(true)
     try {
@@ -226,26 +230,46 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
       const r = await callEntry("import_from_academic", args)
       const stats = r.stats || {}
       const msg = [
-        `✅ 导入成功（适配器：${r.adapter || f.adapter}）`,
-        r.semester_fetched ? `学期：${r.semester_fetched.name || r.semester_fetched}` : null,
-        `课程：${stats.courses_created ?? "-"} 新建，${stats.courses_updated ?? "-"} 更新`,
-        `课时：${stats.sessions_created ?? "-"}`,
-        stats.skipped ? `跳过：${stats.skipped}` : null,
-      ].filter(Boolean).join(" | ")
+        "导入成功（适配器：" + (r.adapter || f.adapter) + "）",
+        stats.courses ? "课程 " + stats.courses + " 门" : "",
+        stats.sessions ? "课时 " + stats.sessions + " 节" : "",
+        stats.created ? "新增 " + stats.created : "",
+        stats.updated ? "更新 " + stats.updated : "",
+      ].filter(Boolean).join("，")
       toast.success(msg)
       importForm.setValues({
         ...importForm.values,
         username: "",
         password: "",
-        semester_keyword: "",
-        semester_id: "",
       })
       await refreshAll()
-    } catch (err: any) {
-      toast.error(String(err?.message || err))
-    } finally {
-      setImportLoading(false)
-    }
+    } catch (err: any) { toast.error(String(err?.message || err)) }
+    finally { setImportLoading(false) }
+  }
+
+  // === CSV / 文本导入函数 ===
+  async function doImportCsv() {
+    if (!csvText.trim()) { toast.error("请粘贴课程表格内容"); return }
+    setCsvLoading(true)
+    try {
+      const r = await callEntry("import_from_structured", {
+        format: "csv",
+        text: csvText,
+        semester_id: activeSem?.id || 0,
+      })
+      const stats = r.stats || {}
+      toast.success("导入成功：课程 " + (stats.courses || 0) + " 门，课时 " + (stats.sessions || 0) + " 节")
+      setCsvText("")
+      await refreshAll()
+    } catch (err: any) { toast.error(String(err?.message || err)) }
+    finally { setCsvLoading(false) }
+  }
+
+  async function doExportCsv() {
+    try {
+      const r = await callEntry("export_schedule", { format: "csv" })
+      toast.success("课程表已导出（" + (r.text || r.url || "请查看返回数据") + "）")
+    } catch (err: any) { toast.error(String(err?.message || err)) }
   }
 
   async function addSemester() {
@@ -389,51 +413,6 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
           <Alert tone="warning">还没有学期，请在下方创建一个学期</Alert>
         ) : null}
 
-        {/* 使用教程 */}
-        <Card title="快速上手指引">
-          <Stack>
-            <Button tone="primary" onClick={() => setGuideOpen((v) => !v)}>
-              {guideOpen ? "收起教程" : "展开教程"}
-            </Button>
-            {guideOpen ? (
-              <Stack gap="md">
-                <Alert tone="info">
-                  按下面 3 步走，即可完成初始化。最简单的方式是使用教务系统一键导入。
-                </Alert>
-                <Stack gap="xs">
-                  <Text tone="bold">① 创建学期</Text>
-                  <Text size="sm" tone="muted">
-                    在下方「学期管理」里填写学期名（如 2025 秋季）、开始 / 结束日期，点「添加学期」。
-                  </Text>
-                </Stack>
-                <Stack gap="xs">
-                  <Text tone="bold">② 添加课程（两种方式任选其一）</Text>
-                  <Text size="sm" tone="muted">
-                    A. 一键从教务系统导入：填写教务系统地址（或学校代码）+ 学号密码 → 自动拉取所有课程。
-                  </Text>
-                  <Text size="sm" tone="muted">
-                    B. 手动录入：在下方「添加课程」里逐门填写课程名、教师、地点、周几第几节。
-                  </Text>
-                </Stack>
-                <Stack gap="xs">
-                  <Text tone="bold">③ 作业 / 考试 / 提醒（可选）</Text>
-                  <Text size="sm" tone="muted">
-                    添加完课程后，可以在下方「作业管理」「考试管理」里添加作业和考试。上课提醒需在
-                    plugin.toml 的 [course] 段里把 remind_enabled 设为 true。
-                  </Text>
-                </Stack>
-                <Divider />
-                <Text tone="muted" size="sm">
-                  💡 更多功能（周重复 / 单双周 / 例外调课 / AI 查询）请见插件附带的使用指南文档，
-                  或直接向 AI 询问课程表相关问题。
-                </Text>
-              </Stack>
-            ) : (
-              <Text tone="muted" size="sm">创建学期 → 一键教务导入（或手动添加课程）→ 完成</Text>
-            )}
-          </Stack>
-        </Card>
-
         {/* 今日课表 */}
         <Card title="今日课表">
           {todaySessions.length > 0 ? (
@@ -506,12 +485,52 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
           </Stack>
         </Card>
 
-        {/* 一键从教务系统导入 */}
+        {/* ========== 新增：快速上手指引 ========== */}
+        <Card title="快速上手指引">
+          <Stack gap="xs">
+            <Button tone="primary" onClick={() => setGuideOpen((v) => !v)}>
+              {guideOpen ? "收起指引" : "展开指引"}
+            </Button>
+            {guideOpen ? (
+              <Stack gap="xs">
+                <Alert tone="info">
+                  按这 3 步完成初始化。最简单的方式是一键从教务系统导入。
+                </Alert>
+                <Text tone="bold">1. 创建学期</Text>
+                <Text tone="muted" size="sm">
+                  在上方「学期管理」填写学期名（如 2025秋季）、开始 / 结束日期，点「添加学期」。
+                </Text>
+                <Text tone="bold">2. 添加课程（两种方式任选）</Text>
+                <Text tone="muted" size="sm">
+                  A. 一键教务导入：填教务系统地址（或学校代码）+ 学号密码 → 自动拉取全部课程。
+                </Text>
+                <Text tone="muted" size="sm">
+                  B. 表格粘贴导入：从教务系统复制课程表格 → 粘贴到下方文本框 → 一键导入。
+                </Text>
+                <Text tone="muted" size="sm">
+                  C. 手动录入：在下方「添加课程」逐门填写课程名、教师、地点、周几第几节。
+                </Text>
+                <Text tone="bold">3. 作业 / 考试 / 提醒（可选）</Text>
+                <Text tone="muted" size="sm">
+                  添加完课程后，在下方「作业管理」「考试管理」里添加。上课提醒需在 plugin.toml 的 [course] 段把 remind_enabled 设为 true。
+                </Text>
+                <Divider />
+                <Text tone="muted" size="sm">
+                  更多说明见 docs/guide.md，或直接向 AI 询问课程表相关问题。
+                </Text>
+              </Stack>
+            ) : (
+              <Text tone="muted" size="sm">创建学期 → 一键教务 / 表格导入 / 手动录入 → 完成</Text>
+            )}
+          </Stack>
+        </Card>
+
+        {/* ========== 新增：一键从教务系统导入 ========== */}
         <Card title="一键从教务系统导入">
-          <Stack>
+          <Stack gap="xs">
             {adapters.length === 0 ? (
               <Alert tone="warning">
-                未检测到可用的教务适配器。请确认插件已完整加载，或联系开发者添加适配器。
+                未检测到可用的教务适配器。请确认插件已完整加载。
               </Alert>
             ) : (
               <Text tone="muted" size="sm">
@@ -536,7 +555,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
               <Field label="或 学校代码">
                 <Input
                   value={importForm.values.school_code}
-                  placeholder="如 12623（可选，有预设时不用填地址）"
+                  placeholder="如 12623（可选）"
                   onChange={(v) => importForm.setField("school_code", v)}
                 />
               </Field>
@@ -550,20 +569,20 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
               <Field label="密码">
                 <Input
                   value={importForm.values.password}
-                  placeholder="教务系统密码（仅本次请求）"
+                  placeholder="教务系统密码"
                   onChange={(v) => importForm.setField("password", v)}
                 />
               </Field>
               <Field label="学期关键字（可选）">
                 <Input
                   value={importForm.values.semester_keyword}
-                  placeholder="如 '2025秋'，不填则默认最新学期"
+                  placeholder="如 2025秋"
                   onChange={(v) => importForm.setField("semester_keyword", v)}
                 />
               </Field>
             </Grid>
             {activeSem ? (
-              <Field label={`导入到学期（当前：${activeSem.name}，可选）`}>
+              <Field label={"导入到学期（当前：" + activeSem.name + "，可选）"}>
                 <Select
                   value={importForm.values.semester_id}
                   options={[
@@ -582,8 +601,31 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
               {importLoading ? "导入中..." : "一键从教务系统导入"}
             </Button>
             <Alert tone="info">
-              导入时将自动创建 / 更新课程与课时。学号密码仅在本次请求中使用，不会被保存。
+              学号密码仅在本次请求中使用，不会被保存。
             </Alert>
+          </Stack>
+        </Card>
+
+        {/* ========== 新增：表格粘贴导入（CSV） ========== */}
+        <Card title="表格粘贴导入">
+          <Stack gap="xs">
+            <Text tone="muted" size="sm">
+              从教务系统或 Excel 复制课程表格内容，粘贴到下方文本框。支持 CSV 或制表符分隔。
+              每行格式：课程名, 教师, 地点, 周几(1-7), 节次(如 1-2)
+            </Text>
+            <Input
+              value={csvText}
+              placeholder={"示例：\n高等数学,张老师,A-101,1,1-2\n大学英语,李老师,B-202,2,3-4\n线性代数,王老师,C-303,3,5-6"}
+              onChange={(v) => setCsvText(v)}
+            />
+            <Button
+              tone="primary"
+              onClick={doImportCsv}
+              disabled={csvLoading}
+            >
+              {csvLoading ? "导入中..." : "从表格导入"}
+            </Button>
+            <Button tone="default" onClick={doExportCsv}>导出当前课程表为 CSV</Button>
           </Stack>
         </Card>
 
