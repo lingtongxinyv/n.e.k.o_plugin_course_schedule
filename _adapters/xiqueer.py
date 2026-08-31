@@ -341,45 +341,126 @@ class XiQueErAdapter(AcademicAdapter):
         if not self._session:
             raise AcademicAdapterError("未登录，请先 authenticate")
 
-        self._session.cookie_jar.set_cookie(
-            http.cookiejar.Cookie(
-                version=0, name="USERNAME", value=self._username,
-                port=None, port_specified=False, domain="", domain_specified=False,
-                domain_initial_dot=False, path="/", path_specified=True,
-                secure=False, expires=None, discard=True, comment=None,
-                comment_url=None, rest={}, rfc2109=False,
-            )
-        )
-        self._session.cookie_jar.set_cookie(
-            http.cookiejar.Cookie(
-                version=0, name="weballow", value="true",
-                port=None, port_specified=False, domain="", domain_specified=False,
-                domain_initial_dot=False, path="/", path_specified=True,
-                secure=False, expires=None, discard=True, comment=None,
-                comment_url=None, rest={}, rfc2109=False,
-            )
-        )
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._do_fetch_courses_sync, semester_info)
 
-        xnxq = semester_info.get("school_year", "") + "-" + semester_info.get("term", "1")
-        r = self._session.get(
-            f"{self.base_url}/xskbcx!getKbxxByXs?"
-            f"query.xnxq={urllib.parse.quote(xnxq)}"
-            f"&query.xsh={urllib.parse.quote(self._username)}"
-            f"&query.kbzc=jsxx,jc,jc2,cd,zc,dwmc,xnxqm,xsksxm,xsdm,xsm,xxm,xjx,xsks,pym,zb,zs",
-            timeout=15,
-        )
-        if r.status_code != 200:
-            raise AcademicAdapterError(f"获取课程失败：HTTP {r.status_code}")
-        text = r.text
-        if "登录" in text and ("页面" in text or "错误" in text or "失效" in text):
-            raise AcademicAdapterError("抓课返回登录页，cookie 可能已失效")
+    def _do_fetch_courses_sync(self, semester_info: dict) -> list[dict]:
+        """同步抓课：多 URL + 多参数格式 + POST/GET 轮询，HTML 兜底解析。"""
+        T = 12
 
+        # 先访问主页让服务器下发完整 cookie
+        for warmup in [f"{self.base_url}/cas/index.action",
+                       f"{self.base_url}/frame/homepage",
+                       f"{self.base_url}/student/wsxk.xskcb10319.jsp"]:
+            try:
+                self._session.get(warmup, timeout=T)
+            except Exception:
+                pass
+
+        username = self._username
+        sy = semester_info.get("school_year", "")
+        term = semester_info.get("term", "1")
         try:
-            raw = r.json()
+            sy_int = int(sy)
+            next_sy = str(sy_int + 1)
         except Exception:
-            raise AcademicAdapterError(f"抓课返回非 JSON：{text[:200]}")
+            next_sy = sy
 
-        return self._parse_course_payload(raw)
+        # 多种学期参数格式（KingOSOFT 不同版本用不同格式）
+        xnxq_formats = [
+            f"{sy}-{next_sy}-{term}",   # 2025-2026-1 （新版标准）
+            f"{sy}-{term}",              # 2025-1        （旧版）
+            f"{sy}{next_sy}{term}",      # 202520261     （数字拼接）
+        ]
+        xq_cn = "秋" if term == "1" else "春"
+        xnxq_formats.append(f"{sy}{xq_cn}")  # 2025秋
+
+        # 先尝试 JSON API（多个 URL + 参数格式 + GET/POST 组合）
+        api_urls = [
+            # Struts2 新版 action 路径
+            f"{self.base_url}/xskbcx!getKbxxByXs",
+            f"{self.base_url}/cas/xskbcx!getKbxxByXs",
+            f"{self.base_url}/xskbcx/getKbxxByXs.action",
+            # 老版 .action 后缀
+            f"{self.base_url}/xskbcx/getKbxxByXs",
+        ]
+
+        common_query = "jsxx,jc,jc2,cd,zc,dwmc,xnxqm,xsksxm,xsdm,xsm,xxm,xjx,xsks,pym,zb,zs"
+
+        for api_url in api_urls:
+            for xnxq in xnxq_formats:
+                for method in ("GET", "POST"):
+                    try:
+                        headers = {
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                            "Accept": "application/json, text/javascript, */*; q=0.01",
+                            "X-Requested-With": "XMLHttpRequest",
+                            "Referer": f"{self.base_url}/cas/index.action",
+                        }
+                        qs = (f"query.xnxq={urllib.parse.quote(xnxq)}"
+                              f"&query.xsh={urllib.parse.quote(username)}"
+                              f"&query.kbzc={common_query}")
+                        if method == "GET":
+                            r = self._session.get(f"{api_url}?{qs}", headers=headers, timeout=T)
+                        else:
+                            r = self._session.post(api_url, data=qs, headers=headers, timeout=T)
+
+                        if r.status_code != 200:
+                            continue
+
+                        text = r.text.strip()
+                        # 跳过登录失效页面
+                        if ("凭证已失效" in text
+                                or "登录" in text[:300] and ("失效" in text or "错误" in text)):
+                            continue
+                        # 跳过 "无效访问请求" 页面
+                        if "无效访问请求" in text[:500]:
+                            continue
+
+                        # 尝试 JSON
+                        try:
+                            raw = r.json()
+                        except Exception:
+                            # 不是 JSON → 试试 HTML 解析（Dawn-Course kingosoft.js 思路）
+                            courses = self._parse_kb_html(text)
+                            if courses:
+                                return courses
+                            continue
+
+                        # JSON 成功
+                        courses = self._parse_course_payload(raw)
+                        if courses:
+                            return courses
+
+                    except Exception:
+                        continue
+
+        # 所有 JSON API 都失败了 → 尝试直接访问课表页面 HTML（旧版 KingoSOFT 常见方式）
+        html_urls = [
+            f"{self.base_url}/student/wsxk.xskcb10319.jsp",
+            f"{self.base_url}/znpk/Pri_StuSel.aspx",
+            f"{self.base_url}/jwweb/wsxk/stu_zxjg_rpt.aspx",
+        ]
+        for hu in html_urls:
+            for xnxq in xnxq_formats[:2]:  # 只用前两种格式
+                try:
+                    params = {
+                        "xn": sy, "xq": term, "xnxq": xnxq,
+                        "xh": username, "xsh": username,
+                    }
+                    query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
+                    r = self._session.get(f"{hu}?{query}", timeout=T)
+                    if r.status_code == 200 and len(r.text) > 2000 and "登录" not in r.text[:500]:
+                        courses = self._parse_kb_html(r.text)
+                        if courses:
+                            return courses
+                except Exception:
+                    continue
+
+        raise AcademicAdapterError(
+            f"所有课表 API 尝试均失败。"
+            f"请确认：(1) 登录成功 (2) 学期关键字格式（如 2025秋）(3) 学校教务系统支持。"
+        )
 
     # ---- _parse_course_payload ---------------------------------------------
 
@@ -473,4 +554,167 @@ class XiQueErAdapter(AcademicAdapter):
             seen.add(key)
             unique.append(row)
         return unique
+
+    # ---- _parse_kb_html ----------------------------------------------------
+    """Python 版 Dawn-Course kingosoft.js：解析 HTML 课表页面。"""
+
+    @staticmethod
+    def _strip_html_tags(html: str) -> str:
+        text = re.sub(r"<[^>]+>", "", html or "")
+        text = text.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    @staticmethod
+    def _parse_kb_html(html: str) -> list[dict]:
+        """从 KingoSOFT 青果教务系统的 HTML 课表页面提取课程。"""
+        if not html or len(html) < 500:
+            return []
+        clean = html.replace("\r", "").replace("\n", "")
+        courses: list[dict] = []
+
+        # 提取所有 <tr>
+        tr_pat = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+        td_pat = re.compile(r"<(td|th)[^>]*>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
+
+        rows = [m.group(1) for m in tr_pat.finditer(clean)]
+        if not rows:
+            return []
+
+        # 找表头建立 dayMap（星期几在第几列）
+        day_map: dict[int, int] = {}  # 列索引 → 星期几
+        header_found = False
+        for row_html in rows:
+            cells = [m.group(2) for m in td_pat.finditer(row_html)]
+            if not cells:
+                continue
+            for i, c in enumerate(cells):
+                t = XiQueErAdapter._strip_html_tags(c)
+                if "星期一" in t or "周一" in t:
+                    day_map[i] = 1; header_found = True
+                elif "星期二" in t or "周二" in t:
+                    day_map[i] = 2; header_found = True
+                elif "星期三" in t or "周三" in t:
+                    day_map[i] = 3; header_found = True
+                elif "星期四" in t or "周四" in t:
+                    day_map[i] = 4; header_found = True
+                elif "星期五" in t or "周五" in t:
+                    day_map[i] = 5; header_found = True
+                elif "星期六" in t or "周六" in t:
+                    day_map[i] = 6; header_found = True
+                elif ("星期日" in t or "周日" in t or "星期天" in t):
+                    day_map[i] = 7; header_found = True
+            if header_found:
+                break
+
+        if header_found:
+            for row_html in rows:
+                cells = [m.group(2) for m in td_pat.finditer(row_html)]
+                if not cells:
+                    continue
+                max_col = len(cells) - 1
+                for col_idx, day in day_map.items():
+                    cell_html = cells[col_idx] if col_idx < len(cells) else ""
+                    for course in XiQueErAdapter._parse_kb_cell(cell_html, day):
+                        courses.append(course)
+        else:
+            # 旧版 class="td" 兜底
+            td_legacy = re.compile(r'<td[^>]*class=["\']?td["\']?[^>]*>(.*?)</td>', re.IGNORECASE | re.DOTALL)
+            for row_html in rows:
+                cells = [m.group(1) for m in td_legacy.finditer(row_html)]
+                for day, cell_html in enumerate(cells, start=1):
+                    for course in XiQueErAdapter._parse_kb_cell(cell_html, day):
+                        courses.append(course)
+
+        # 去重
+        seen = set()
+        result = []
+        for c in courses:
+            key = (c["title"], c["weekday"], c["periods"])
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(c)
+        return result
+
+    @staticmethod
+    def _parse_kb_cell(cell_html: str, weekday: int) -> list[dict]:
+        """解析单个单元格（可能含多门课，用 <div> 分隔）。"""
+        results: list[dict] = []
+        if not cell_html or "div_nokb" in cell_html:
+            return results
+
+        # 分块（每个 <div> 一个课程块）
+        div_pat = re.compile(r"<div[^>]*>(.*?)</div>", re.IGNORECASE | re.DOTALL)
+        blocks = [m.group(1) for m in div_pat.finditer(cell_html)]
+        if not blocks:
+            blocks = [cell_html]
+
+        for block in blocks:
+            if not block.strip() or "div_nokb" in block:
+                continue
+
+            # 课程名：<font> 标签里
+            font_match = re.search(r"<font[^>]*>(.*?)</font>", block, re.IGNORECASE | re.DOTALL)
+            if font_match:
+                name = XiQueErAdapter._strip_html_tags(font_match.group(1))
+            else:
+                name = ""
+
+            # 用 <br> 分割剩余部分
+            remaining = re.sub(r"<font[^>]*>.*?</font>", "", block, flags=re.IGNORECASE | re.DOTALL)
+            br_parts = re.split(r"<br\s*/?>", remaining, flags=re.IGNORECASE)
+            br_parts = [XiQueErAdapter._strip_html_tags(p) for p in br_parts]
+            br_parts = [p for p in br_parts if p]
+
+            teacher = location = weeks_str = sections_str = ""
+            for p in br_parts:
+                # 周次+节次：1-16[1-2] 或 1,3,5[1-2] 或 1-16 1-2节
+                time_match = re.search(r"([0-9,\-]+)\s*(?:周|周次)?\s*[\[\(（]\s*([0-9,\-]+)\s*(?:节|节次)?\s*[\]\)）]", p)
+                if time_match:
+                    weeks_str = time_match.group(1)
+                    sections_str = time_match.group(2)
+                    continue
+                # 另一种格式："1-16周 1-2节"
+                time_match2 = re.search(r"([0-9,\-]+)\s*周[，,]?\s*([0-9,\-]+)\s*节", p)
+                if time_match2:
+                    weeks_str = time_match2.group(1)
+                    sections_str = time_match2.group(2)
+                    continue
+                # 地点识别
+                if not location and re.search(r"(楼|室|馆|区|号|座|园|部|教室)", p):
+                    location = p
+                    continue
+                # 推测
+                if not weeks_str and not teacher:
+                    teacher = p
+                elif weeks_str and not location:
+                    location = p
+                elif not teacher:
+                    teacher = p
+
+            if not name:
+                # 没 <font> 就用第一行非空文本
+                text_parts = [XiQueErAdapter._strip_html_tags(b) for b in re.split(r"<br\s*/?>", block, flags=re.IGNORECASE)]
+                for tp in text_parts:
+                    tp = tp.strip()
+                    if tp and not XiQueErAdapter._looks_like_time(tp):
+                        name = tp
+                        break
+
+            if name and (weeks_str or sections_str):
+                periods = sections_str or ""
+                results.append({
+                    "title": name.strip(),
+                    "teacher": teacher.strip(),
+                    "location": location.strip(),
+                    "weekday": weekday,
+                    "weeks": weeks_str.strip(),
+                    "periods": periods.strip(),
+                })
+        return results
+
+    @staticmethod
+    def _looks_like_time(text: str) -> bool:
+        return bool(re.match(r"^[\d,\-]+\s*(周|节|日|次)", text))
 
