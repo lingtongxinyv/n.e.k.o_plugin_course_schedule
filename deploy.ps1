@@ -57,16 +57,22 @@ if ($missing.Count -gt 0) {
 Write-Step "Step 1/5 - locate N.E.K.O source"
 
 if (-not $NekoSrc) {
-    $candidates = @(
+    # Probe candidates - check existence directly, avoid Join-Path quirks
+    $probeList = @(
         "$env:USERPROFILE\Documents\N.E.K.O-src",
         "$env:USERPROFILE\N.E.K.O-src",
         "$env:USERPROFILE\code\N.E.K.O-src",
         "$env:USERPROFILE\source\repos\N.E.K.O-src",
         "C:\N.E.K.O-src"
-    ) | Where-Object { Test-Path (Join-Path $_ "pyproject.toml") }
+    )
+    foreach ($p in $probeList) {
+        if ($p -and (Test-Path "$p\pyproject.toml")) {
+            $NekoSrc = $p
+            break
+        }
+    }
 
-    if ($candidates.Count -gt 0) {
-        $NekoSrc = $candidates[0]
+    if ($NekoSrc) {
         Write-Ok "auto-detected: $NekoSrc"
     } else {
         Write-Warn "could not auto-detect N.E.K.O source"
