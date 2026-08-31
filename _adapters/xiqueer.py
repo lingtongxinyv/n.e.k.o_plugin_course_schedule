@@ -15,8 +15,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from ._academic_adapter import AcademicAdapter, AcademicAdapterError
-from ._jkingo_des import KingoDES  # noqa: F401 — 供 type hint 使用
+from .._academic_adapter import AcademicAdapter, AcademicAdapterError
+from .jkingo_des import KingoDES
 
 # ---------------------------------------------------------------------------
 # SSL / 请求层：零第三方依赖，全标准库
@@ -468,6 +468,3 @@ class XiQueErAdapter(AcademicAdapter):
             unique.append(row)
         return unique
 
-
-# 注册（如果基类有自动注册）
-AcademicAdapter._registry["xiqueer"] = XiQueErAdapter
