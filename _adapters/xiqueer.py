@@ -128,6 +128,8 @@ class XiQueErAdapter(AcademicAdapter):
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Referer": f"{self.base_url}/cas/login.action",
                 "Cookie": f"JSESSIONID={jsessionid}",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "X-Requested-With": "XMLHttpRequest",
             }
             r = s.post(f"{self.base_url}/cas/logon.action", data=post_body, headers=headers, timeout=10)
             try:
