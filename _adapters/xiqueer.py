@@ -22,7 +22,6 @@ from typing import Any
 from .._academic_adapter import AcademicAdapter, AcademicAdapterError
 from .jkingo_des import KingoDES
 
-
 # 一些已知青果/喜鹊儿教务系统的 base_url（用户也可以直接传）
 # 可从 https://github.com/shutdown-awa/XiQueEr2Ics 持续扩展
 SCHOOL_PRESETS: dict[str, dict[str, str]] = {

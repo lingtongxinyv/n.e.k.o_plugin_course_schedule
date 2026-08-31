@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from plugin.sdk.plugin import Err, Ok, SdkError, plugin_entry
 from plugin.sdk.shared.core.router import PluginRouter
 
-from .._time import format_schedule, period_to_datetime, weekday_of, week_number
+from .._time import format_schedule, period_to_datetime, week_number, weekday_of
 
 
 class QueryRouter(PluginRouter):

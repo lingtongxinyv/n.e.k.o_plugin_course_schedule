@@ -37,5 +37,4 @@ def get_adapter(adapter_id: str, **kwargs) -> AcademicAdapter:
 
 from .xiqueer import XiQueErAdapter  # noqa: E402
 
-
 _REGISTRY["xiqueer"] = XiQueErAdapter

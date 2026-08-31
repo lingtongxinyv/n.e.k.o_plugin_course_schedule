@@ -4,7 +4,7 @@ from __future__ import annotations
 from plugin.sdk.plugin import unwrap
 
 from ._schema import DEFAULT_PERIOD_TIMES, ensure_schema, parse_weeks, weeks_to_json
-from ._time import active_in_week, weekday_of, week_number
+from ._time import active_in_week, week_number, weekday_of
 
 
 class ScheduleRepo:

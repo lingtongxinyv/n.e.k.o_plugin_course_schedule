@@ -17,7 +17,8 @@ from plugin.sdk.plugin import (
     neko_plugin,
     timer_interval,
 )
-from plugin.sdk.plugin.ui import UI_ACTION_META_ATTR, context as ui_context
+from plugin.sdk.plugin.ui import UI_ACTION_META_ATTR
+from plugin.sdk.plugin.ui import context as ui_context
 
 from ._repo import ScheduleRepo
 from ._time import period_to_datetime, week_number, weekday_of

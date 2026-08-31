@@ -21,7 +21,6 @@ from plugin.sdk.shared.core.router import PluginRouter
 
 from .._time import parse_date, parse_weekday
 
-
 # ──────────────────────────────────────────────────────────────
 # 纯函数：各种格式 → 统一中间结构
 # 中间结构（normalized）：
@@ -100,7 +99,6 @@ def parse_ics(content: str) -> dict:
     策略：抓所有 VEVENT，按 SUMMARY 聚合成课程；从 RRULE / RDATE 推导 weekday+weeks；
     DTSTART 取 time-of-day 映射到 period_no（按默认作息时间）。
     """
-    from datetime import datetime, timedelta
 
     events: list[dict[str, Any]] = []
     cur: dict[str, Any] | None = None
@@ -276,7 +274,7 @@ async def _apply_normalized(router: PluginRouter, data: dict, semester_id: int) 
                 if c["name"] == match_name:
                     course_id = c["id"]
                     break
-        rec = await repo.add_exception(
+        await repo.add_exception(
             semester_id=sem["id"],
             course_id=course_id,
             title=ed.get("title"),
@@ -513,7 +511,7 @@ def _build_ics(norm: dict) -> str:
     week_day_abbr = {1: "MO", 2: "TU", 3: "WE", 4: "TH", 5: "FR", 6: "SA", 7: "SU"}
 
     sem = norm.get("semester") or {}
-    year = (sem.get("start_date") or "2025-09-01")[:4]
+    (sem.get("start_date") or "2025-09-01")[:4]
     start_yyyymmdd = (sem.get("start_date") or "20250901").replace("-", "")
 
     for c in norm["courses"]:
@@ -523,7 +521,7 @@ def _build_ics(norm: dict) -> str:
             et = end_map.get(pno, "084500")
             byday = week_day_abbr.get(s["weekday"], "MO")
             weeks = s.get("weeks") or list(range(1, 21))
-            rrule_weeks = ",".join(f"BYSETPOS={w}" for w in weeks)
+            ",".join(f"BYSETPOS={w}" for w in weeks)
             loc = c.get("location") or ""
             lines += [
                 "BEGIN:VEVENT",
