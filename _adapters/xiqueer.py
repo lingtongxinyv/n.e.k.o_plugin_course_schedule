@@ -177,7 +177,7 @@ class XiQueErAdapter(AcademicAdapter):
 
     def _do_login_sync(self, base_url: str, username: str, password: str, md5_password: str | None):
         """同步登录（由 run_in_executor 调用，避免阻塞事件循环）。"""
-        T = 8
+        T = 5  # 极限：宿主 entry 硬限 30s，登录 + 抓课共享这个时间
         s = _HttpSession()
 
         # 1) 登录页面
@@ -345,121 +345,70 @@ class XiQueErAdapter(AcademicAdapter):
         return await loop.run_in_executor(None, self._do_fetch_courses_sync, semester_info)
 
     def _do_fetch_courses_sync(self, semester_info: dict) -> list[dict]:
-        """同步抓课：多 URL + 多参数格式 + POST/GET 轮询，HTML 兜底解析。"""
-        T = 12
-
-        # 先访问主页让服务器下发完整 cookie
-        for warmup in [f"{self.base_url}/cas/index.action",
-                       f"{self.base_url}/frame/homepage",
-                       f"{self.base_url}/student/wsxk.xskcb10319.jsp"]:
-            try:
-                self._session.get(warmup, timeout=T)
-            except Exception:
-                pass
+        """同步抓课：严格控制在 ~16s（4 次尝试 × 4s timeout），宿主 entry 硬限 30s。"""
+        T = 4
 
         username = self._username
         sy = semester_info.get("school_year", "")
         term = semester_info.get("term", "1")
         try:
-            sy_int = int(sy)
-            next_sy = str(sy_int + 1)
+            next_sy = str(int(sy) + 1)
         except Exception:
             next_sy = sy
 
-        # 多种学期参数格式（KingOSOFT 不同版本用不同格式）
-        xnxq_formats = [
-            f"{sy}-{next_sy}-{term}",   # 2025-2026-1 （新版标准）
-            f"{sy}-{term}",              # 2025-1        （旧版）
-            f"{sy}{next_sy}{term}",      # 202520261     （数字拼接）
-        ]
-        xq_cn = "秋" if term == "1" else "春"
-        xnxq_formats.append(f"{sy}{xq_cn}")  # 2025秋
-
-        # 先尝试 JSON API（多个 URL + 参数格式 + GET/POST 组合）
-        api_urls = [
-            # Struts2 新版 action 路径
-            f"{self.base_url}/xskbcx!getKbxxByXs",
-            f"{self.base_url}/cas/xskbcx!getKbxxByXs",
-            f"{self.base_url}/xskbcx/getKbxxByXs.action",
-            # 老版 .action 后缀
-            f"{self.base_url}/xskbcx/getKbxxByXs",
-        ]
-
+        # KingoSOFT 喜鹊儿标准版：xnxq 格式 "2025-2026-1"，URL /xskbcx!getKbxxByXs
+        xnxq = f"{sy}-{next_sy}-{term}"  # 最可能命中的跨学年格式
+        api_url = f"{self.base_url}/xskbcx!getKbxxByXs"
         common_query = "jsxx,jc,jc2,cd,zc,dwmc,xnxqm,xsksxm,xsdm,xsm,xxm,xjx,xsks,pym,zb,zs"
 
-        for api_url in api_urls:
-            for xnxq in xnxq_formats:
-                for method in ("GET", "POST"):
-                    try:
-                        headers = {
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                            "Accept": "application/json, text/javascript, */*; q=0.01",
-                            "X-Requested-With": "XMLHttpRequest",
-                            "Referer": f"{self.base_url}/cas/index.action",
-                        }
-                        qs = (f"query.xnxq={urllib.parse.quote(xnxq)}"
-                              f"&query.xsh={urllib.parse.quote(username)}"
-                              f"&query.kbzc={common_query}")
-                        if method == "GET":
-                            r = self._session.get(f"{api_url}?{qs}", headers=headers, timeout=T)
-                        else:
-                            r = self._session.post(api_url, data=qs, headers=headers, timeout=T)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self.base_url}/cas/index.action",
+        }
 
-                        if r.status_code != 200:
-                            continue
-
-                        text = r.text.strip()
-                        # 跳过登录失效页面
-                        if ("凭证已失效" in text
-                                or "登录" in text[:300] and ("失效" in text or "错误" in text)):
-                            continue
-                        # 跳过 "无效访问请求" 页面
-                        if "无效访问请求" in text[:500]:
-                            continue
-
-                        # 尝试 JSON
-                        try:
-                            raw = r.json()
-                        except Exception:
-                            # 不是 JSON → 试试 HTML 解析（Dawn-Course kingosoft.js 思路）
-                            courses = self._parse_kb_html(text)
-                            if courses:
-                                return courses
-                            continue
-
-                        # JSON 成功
-                        courses = self._parse_course_payload(raw)
-                        if courses:
-                            return courses
-
-                    except Exception:
-                        continue
-
-        # 所有 JSON API 都失败了 → 尝试直接访问课表页面 HTML（旧版 KingoSOFT 常见方式）
-        html_urls = [
-            f"{self.base_url}/student/wsxk.xskcb10319.jsp",
-            f"{self.base_url}/znpk/Pri_StuSel.aspx",
-            f"{self.base_url}/jwweb/wsxk/stu_zxjg_rpt.aspx",
+        # 4 次尝试（按命中概率排序）
+        attempts = [
+            ("GET",  api_url, {"query.xnxq": xnxq, "query.xsh": username, "query.kbzc": common_query}),
+            ("GET",  f"{self.base_url}/xskbcx/getKbxxByXs.action", {"query.xnxq": xnxq, "query.xsh": username, "query.kbzc": common_query}),
+            ("POST", api_url, {"query.xnxq": xnxq, "query.xsh": username, "query.kbzc": common_query}),
+            ("GET",  api_url, {"query.xnxq": f"{sy}-{term}", "query.xsh": username, "query.kbzc": common_query}),
         ]
-        for hu in html_urls:
-            for xnxq in xnxq_formats[:2]:  # 只用前两种格式
-                try:
-                    params = {
-                        "xn": sy, "xq": term, "xnxq": xnxq,
-                        "xh": username, "xsh": username,
-                    }
-                    query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
-                    r = self._session.get(f"{hu}?{query}", timeout=T)
-                    if r.status_code == 200 and len(r.text) > 2000 and "登录" not in r.text[:500]:
-                        courses = self._parse_kb_html(r.text)
-                        if courses:
-                            return courses
-                except Exception:
+
+        for method, url, params in attempts:
+            qs = urllib.parse.urlencode(params)
+            try:
+                if method == "GET":
+                    r = self._session.get(f"{url}?{qs}", headers=headers, timeout=T)
+                else:
+                    r = self._session.post(url, data=qs, headers=headers, timeout=T)
+                if r.status_code != 200:
+                    continue
+                text = r.text.strip()
+                if ("凭证已失效" in text
+                        or "无效访问请求" in text[:500]
+                        or ("登录" in text[:300] and ("失效" in text or "错误" in text))):
                     continue
 
+                # JSON 优先，HTML 兜底
+                try:
+                    raw = r.json()
+                except Exception:
+                    courses = self._parse_kb_html(text)
+                    if courses:
+                        return courses
+                    continue
+
+                courses = self._parse_course_payload(raw)
+                if courses:
+                    return courses
+            except Exception:
+                continue
+
         raise AcademicAdapterError(
-            f"所有课表 API 尝试均失败。"
-            f"请确认：(1) 登录成功 (2) 学期关键字格式（如 2025秋）(3) 学校教务系统支持。"
+            "课表 API 未返回有效数据。"
+            "请确认学号密码正确，登录成功后再试。"
         )
 
     # ---- _parse_course_payload ---------------------------------------------
