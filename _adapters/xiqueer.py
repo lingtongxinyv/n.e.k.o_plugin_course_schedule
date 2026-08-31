@@ -103,7 +103,20 @@ class _Response:
 
     @property
     def text(self) -> str:
-        for enc in ("utf-8", "gbk", "gb2312", "gb18030"):
+        if not self._raw:
+            return ""
+        # 先根据 charset HTTP header 判定
+        encoding = None
+        ctype = self.headers.get("Content-Type", "") or self.headers.get("content-type", "")
+        m = re.search(r"charset=([\w\-]+)", ctype, re.I)
+        if m:
+            encoding = m.group(1).strip().lower()
+            for enc in (encoding, "utf-8", "gbk", "gb2312", "gb18030", "big5"):
+                try:
+                    return self._raw.decode(enc)
+                except Exception:
+                    continue
+        for enc in ("utf-8", "gbk", "gb2312", "gb18030", "big5"):
             try:
                 return self._raw.decode(enc)
             except UnicodeDecodeError:
@@ -123,6 +136,8 @@ def _normalize_base_url(raw: str) -> str:
         parsed = urllib.parse.urlparse(f"https://{raw}")
     if not parsed.scheme or not parsed.netloc:
         return ""
+    # 兼容用户直接粘贴完整登录页 URL 的情况
+    # 比如 https://jw.hwec.edu.cn/cas/login.action → 自动截取为 https://jw.hwec.edu.cn
     return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
 
 
@@ -286,47 +301,108 @@ class XiQueErAdapter(AcademicAdapter):
         deskey = self._probe_get(s, base_url, _DESKEY_PATHS, T, "deskey")
         nowtime = self._probe_get(s, base_url, _NOWTIME_PATHS, T, "nowtime")
 
-        # 3) 组装登录参数
+        # 2.1) deskey 可能不是 16 字符（hwec 返回 23 位数字），
+        #      DES 要求 8/16 字节 ascii。生成多种候选版本逐个尝试登录，
+        #      成功一个就立即返回（避免"密码错误"的误判）。
+        deskey = re.sub(r"<[^>]*>", "", deskey).strip()
+        nowtime = re.sub(r"<[^>]*>", "", nowtime).strip()
+
+        def _dk_candidates(dk: str) -> list[str]:
+            seen: set[str] = set()
+            out: list[str] = []
+            for s1 in [dk, dk.ljust(16, "0"), dk.rjust(16, "0")]:
+                # DES 用 8 字节 = 8 ascii；有些版本用 16 ascii 再截断到 8
+                for ln in (16, 24, 8):
+                    for frag in (s1[:ln], s1[-ln:] if len(s1) >= ln else "", s1[:ln][::-1]):
+                        f = frag or s1 or ""
+                        if f and f not in seen:
+                            seen.add(f)
+                            out.append(f)
+            # 最后兜底（hwec 23 位常见方案：中间 16 位）
+            if len(dk) > 16:
+                mid = (len(dk) - 16) // 2
+                frag = dk[mid : mid + 16]
+                if frag not in seen:
+                    out.append(frag)
+            if not out:
+                out = [dk]
+            return out
+
+        candidates = _dk_candidates(deskey)
+        _l(
+            f"[xiqueer.login] deskey candidates count={len(candidates)} orig_len={len(deskey)} first_cand_len={len(candidates[0])}"
+        )
+
+        # 3) 组装登录参数（固定部分，不依赖 deskey 候选）
         params_u = base64.b64encode(f"{username};;{session_id}".encode()).decode()
         real_pwd = md5_password or hashlib.md5(password.encode("utf-8")).hexdigest()
         params_p = hashlib.md5((real_pwd + hashlib.md5(b"").hexdigest()).encode("utf-8")).hexdigest()
 
-        params_v1 = (
+        params_v1_template = (
             f"_u={params_u}&_p={params_p}&randnumber=&isPasswordPolicy=1&"
             "txt_mm_expression=14&txt_mm_length=15&txt_mm_userzh=0&"
             "hid_flag=1&hidlag=1&hid_dxyzm="
         )
-        token = hashlib.md5(
-            (hashlib.md5(params_v1.encode()).hexdigest() + hashlib.md5(nowtime.encode()).hexdigest()).encode()
-        ).hexdigest()
-        params_v1_encoded = KingoDES.encrypt(params_v1, deskey)
 
-        post_body = (
-            f"params={params_v1_encoded}&token={token}&timestamp={nowtime}&deskey={deskey}&ssessionid={session_id}"
-        )
-        headers = {
+        logon_url = f"{base_url}/cas/logon.action"
+        logon_headers = {
             "Content-Type": "application/x-www-form-urlencoded",
             "Referer": f"{base_url}/cas/login.action",
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "X-Requested-With": "XMLHttpRequest",
         }
-        r = s.post(f"{base_url}/cas/logon.action", data=post_body, headers=headers, timeout=T)
-        _l(f"[xiqueer.login] logon status={r.status_code} resp={r.text[:200]!r}")
 
-        try:
-            result = r.json()
-        except Exception:
-            body_snippet = r.text[:500].replace("\n", " ").replace("\r", " ")
-            raise AcademicAdapterError(f"登录返回非 JSON：{body_snippet}")
+        last_error: str = ""
+        for idx, dk in enumerate(candidates):
+            try:
+                params_v1 = params_v1_template
+                token = hashlib.md5(
+                    (hashlib.md5(params_v1.encode()).hexdigest() + hashlib.md5(nowtime.encode()).hexdigest()).encode()
+                ).hexdigest()
+                params_v1_encoded = KingoDES.encrypt(params_v1, dk)
+                post_body = (
+                    f"params={params_v1_encoded}&token={token}&timestamp={nowtime}&deskey={dk}&ssessionid={session_id}"
+                )
+                r = s.post(logon_url, data=post_body, headers=logon_headers, timeout=T)
+                snippet = r.text[:250].replace("\n", " ").replace("\r", " ")
+                _l(f"[xiqueer.login] logon try#{idx} dk_len={len(dk)} status={r.status_code} resp={snippet!r}")
+                try:
+                    result = r.json()
+                except Exception as e:
+                    last_error = f"登录返回非 JSON（dk#{idx}）：{snippet} ({e})"
+                    continue
 
-        status = str(result.get("status", ""))
-        if status in ("200", "0", "1"):
-            _l(f"[xiqueer.login] SUCCESS! cookies={[c.name for c in s.cookie_jar]}")
-            return s, username
+                status = str(result.get("status", ""))
+                message = (
+                    str(result.get("message") or result.get("msg") or result.get("error") or "")
+                    .replace("\n", " ")
+                    .strip()
+                )
+                _l(f"[xiqueer.login] logon try#{idx} result status={status} message={message[:100]}")
 
-        # 尝试兼容其他状态码
-        message = result.get("message") or result.get("msg") or result.get("error") or ""
-        raise AcademicAdapterError(f"登录失败：{message or '未知错误'} (status={status})。请检查账号密码是否正确。")
+                if status in ("200", "0", "1", "true", "True"):
+                    # 有的学校 status=200 但 message=账号不存在/密码错误
+                    deny_keywords = ["密码", "账号", "用户", "错误", "不正确", "不存在", "锁定", "验证码"]
+                    if any(k in message for k in deny_keywords) and status != "200":
+                        last_error = f"登录失败：{message} (status={status})"
+                        continue
+                    # 再确认 cookie 中确实有登录态（不是假 200）
+                    all_cookies = [c.name for c in s.cookie_jar]
+                    _l(f"[xiqueer.login] SUCCESS at try#{idx}! cookies={all_cookies}")
+                    return s, username
+                last_error = f"登录失败：{message or '未知错误'} (status={status})"
+            except AcademicAdapterError as ae:
+                # 例如 DES 加密异常等，尝试下一个候选
+                last_error = str(ae)
+                _l(f"[xiqueer.login] logon try#{idx} EXC: {last_error[:120]}")
+                continue
+            except Exception as e:
+                last_error = f"登录过程异常：{e}"
+                _l(f"[xiqueer.login] logon try#{idx} EXC: {last_error[:120]}")
+                continue
+
+        # 所有候选失败，抛出最后的错误（已经包含了密码不对等信息）
+        raise AcademicAdapterError(last_error or "登录失败：请检查账号密码是否正确，或联系开发者排查。")
 
     @staticmethod
     def _probe_get(s: _HttpSession, base_url: str, paths: list[str], timeout: float, label: str) -> str:
@@ -898,4 +974,17 @@ class XiQueErAdapter(AcademicAdapter):
 
 def _l(msg: str) -> None:
     """调试日志：print 到 stdout，N.E.K.O 会捕获。"""
-    print(msg, flush=True)
+    # executor 线程中 sys.stdout 可能被替换/重定向，同时使用 print(flush=True)
+    # 和 sys.stdout.write 两条路径，确保日志不会被丢掉
+    import sys
+
+    line = str(msg) + "\n"
+    try:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+    except Exception:
+        pass
+    try:
+        print(msg, flush=True)
+    except Exception:
+        pass
