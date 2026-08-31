@@ -1,12 +1,12 @@
 """作业 / 考试 / 倒计时入口。"""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime
 
 from plugin.sdk.plugin import Err, Ok, SdkError, plugin_entry
 from plugin.sdk.shared.core.router import PluginRouter
 
-from .._time import parse_date, weekday_label
+from .._time import parse_date, week_number
 
 
 class TasksRouter(PluginRouter):
@@ -239,7 +239,6 @@ class TasksRouter(PluginRouter):
         days_end = (end - today).days if end else None
 
         # 周数
-        from .._time import week_number
         wn = week_number(sem, today)
         total = int(sem.get("total_weeks") or 0)
 

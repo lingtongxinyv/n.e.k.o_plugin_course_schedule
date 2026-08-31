@@ -1,0 +1,4 @@
+[project]
+name = "course_schedule"
+version = "0.1.0"
+dependencies = []

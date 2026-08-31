@@ -6,7 +6,8 @@ P2：上课提醒、作业/考试管理、倒计时。
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from plugin.sdk.plugin import (
@@ -19,7 +20,7 @@ from plugin.sdk.plugin import (
 from plugin.sdk.plugin.ui import UI_ACTION_META_ATTR, context as ui_context
 
 from ._repo import ScheduleRepo
-from ._time import period_to_datetime, week_number, weekday_label, weekday_of
+from ._time import period_to_datetime, week_number, weekday_of
 from .routers import AcademicRouter, ImportExportRouter, ManageRouter, QueryRouter, TasksRouter
 
 _DEFAULT_TZ = "Asia/Shanghai"

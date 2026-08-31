@@ -292,8 +292,3 @@ def _parse_periods(s: str) -> list[int]:
             except ValueError:
                 continue
     return sorted(set(out))
-
-
-def _parse_periods_str(s: str) -> list[int]:
-    # 同名，去重上面的兼容
-    return _parse_periods(s)

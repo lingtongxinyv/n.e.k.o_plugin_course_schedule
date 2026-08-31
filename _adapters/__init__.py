@@ -8,8 +8,6 @@
 """
 from __future__ import annotations
 
-from typing import Any
-
 from .._academic_adapter import AcademicAdapter, AcademicAdapterError
 
 _REGISTRY: dict[str, type[AcademicAdapter]] = {}
