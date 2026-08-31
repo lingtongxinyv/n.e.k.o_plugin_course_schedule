@@ -8,7 +8,7 @@ version = "0.1.0"
 entry = "plugin.plugins.course_schedule:CourseSchedulePlugin"
 
 [plugin.author]
-name = "N.E.K.O Team"
+name = "lingtongxinyv"
 
 [plugin.sdk]
 recommended = ">=0.1.0,<0.2.0"
@@ -38,6 +38,12 @@ permissions = [
     "action:call",
 ]
 
+[[plugin.ui.guide]]
+id = "quickstart"
+title = "使用指南"
+entry = "docs/guide.md"
+permissions = ["state:read"]
+
 [plugin_runtime]
 enabled = true
 auto_start = false
@@ -45,9 +51,9 @@ auto_start = false
 [course]
 # 默认时区
 timezone = "Asia/Shanghai"
-# 上课提醒提前分钟数（P2 启用）
+# 上课提醒提前分钟数
 remind_lead_minutes = 10
-# 是否启用上课提醒（P2 启用）
+# 是否启用上课提醒
 remind_enabled = false
 # 提醒定时检查间隔（秒）
 remind_check_interval_seconds = 60
