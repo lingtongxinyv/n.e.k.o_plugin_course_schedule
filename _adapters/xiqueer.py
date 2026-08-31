@@ -68,20 +68,45 @@ class XiQueErAdapter(AcademicAdapter):
             })
 
             # 1) 登录页面
-            r = s.get(f"{self.base_url}/cas/login.action", timeout=10)
+            login_page_url = f"{self.base_url}/cas/login.action"
+            r = s.get(login_page_url, timeout=10)
             if r.status_code != 200:
-                raise AcademicAdapterError(f"无法访问教务系统登录页：HTTP {r.status_code}")
+                raise AcademicAdapterError(f"无法访问教务系统登录页：HTTP {r.status_code}（{login_page_url}）")
             jsessionid = s.cookies.get("JSESSIONID")
             if not jsessionid:
-                raise AcademicAdapterError("登录页未返回 JSESSIONID")
-            m = re.search(r'var\s+_sessionid\s*=\s*"([A-F0-9]+)"', r.text)
-            session_id = m.group(1) if m else None
+                raise AcademicAdapterError(
+                    "登录页未返回 JSESSIONID。"
+                    f" 登录页内容前200字：{r.text[:200]}"
+                )
+
+            # 尝试多种正则匹配 _sessionid（不同学校登录页格式略有差异）
+            session_id = None
+            session_id_patterns = [
+                r'var\s+_sessionid\s*=\s*"([A-Fa-f0-9]+)"',       # 标准大写 hex
+                r"var\s+_sessionid\s*=\s*'([A-Fa-f0-9]+)'",       # 单引号版本
+                r"var\s+sessionid\s*=\s*['\"]([A-Fa-f0-9]+)['\"]",  # 变量名无下划线
+                r'_sessionid["\']?\s*[:=]\s*["\']([A-Fa-f0-9]+)["\']',  # JSON/对象属性风格
+            ]
+            for pat in session_id_patterns:
+                m = re.search(pat, r.text)
+                if m:
+                    session_id = m.group(1)
+                    break
+
+            if not session_id:
+                raise AcademicAdapterError(
+                    "无法从登录页提取 _sessionid（学校教务系统登录页格式可能不同）。"
+                    f" 登录页前300字：{r.text[:300]}"
+                )
 
             # 2) 动态参数
             deskey = s.get(f"{self.base_url}/frame/homepage?method=getTempDeskey", timeout=10).text.strip()
             nowtime = s.get(f"{self.base_url}/frame/homepage?method=getTempNowtime", timeout=10).text.strip()
             if not deskey or not nowtime:
-                raise AcademicAdapterError("获取 deskey/nowtime 失败，教务系统可能不可用")
+                raise AcademicAdapterError(
+                    "获取 deskey/nowtime 失败，教务系统可能不可用或需要额外参数。"
+                    f" deskey={deskey[:50] if deskey else '(空)'}, nowtime={nowtime[:50] if nowtime else '(空)'}"
+                )
 
             # 3) 组装登录参数
             params_u = base64.b64encode(f"{username};;{session_id}".encode()).decode()
@@ -108,9 +133,18 @@ class XiQueErAdapter(AcademicAdapter):
             try:
                 result = r.json()
             except Exception:
-                raise AcademicAdapterError(f"登录返回非 JSON：{r.text[:200]}")
+                # 服务器返回了 HTML 而非 JSON —— 通常意味着 session/token 失效
+                body_snippet = r.text[:500].replace("\n", " ").replace("\r", " ")
+                raise AcademicAdapterError(
+                    f"登录返回非 JSON（服务器返回了 HTML/脚本）。"
+                    f" 登录凭证 session/deskey 可能已失效或与该教务系统版本不兼容。"
+                    f" 服务器响应前500字：{body_snippet}"
+                )
             if str(result.get("status")) != "200":
-                raise AcademicAdapterError(f"登录失败：{result.get('message', '未知错误')}")
+                raise AcademicAdapterError(
+                    f"登录失败：{result.get('message', '未知错误')} "
+                    f"(code={result.get('status')})"
+                )
 
             return s, username
 
