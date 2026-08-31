@@ -156,7 +156,9 @@ class XiQueErAdapter(AcademicAdapter):
     # ---- authenticate ------------------------------------------------------
 
     async def authenticate(self, creds: dict[str, Any]) -> None:
-        self.base_url = _normalize_base_url(creds.get("base_url") or creds.get("website", ""))
+        # 优先级：creds 里传的 base_url 最优先，其次用 __init__ 里存好的 self.base_url
+        raw_base = creds.get("base_url") or creds.get("website") or self.base_url
+        self.base_url = _normalize_base_url(raw_base)
         username = (creds.get("username") or creds.get("student_id") or "").strip()
         password = creds.get("password", "")
         md5_password = creds.get("md5_password")
