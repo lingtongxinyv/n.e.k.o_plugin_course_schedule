@@ -139,8 +139,8 @@ class XiQueErAdapter(AcademicAdapter):
         GET  /xskbcx!getKbxxByXs?query.xnxq=...&query.xsh=...&query.kbzc=...
     """
 
-    id = "xiqueer"
-    name = "喜鹊儿（青果教务）"
+    adapter_id = "xiqueer"
+    adapter_name = "喜鹊儿（青果教务）"
     website = "https://jw.hwec.edu.cn"
 
     def __init__(self):
