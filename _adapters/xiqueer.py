@@ -25,6 +25,7 @@ import json
 import re
 import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -124,6 +125,29 @@ class _Response:
         return json.loads(self.text)
 
 
+def _normalize_base_url(raw: str) -> str:
+    """把用户可能输入的各种 URL 形式统一成教务系统根域名。
+
+    用户可能粘进来的：
+      https://jw.hwec.edu.cn                    ← 正确
+      https://jw.hwec.edu.cn/cas/login.action    ← 粘了完整登录页 URL
+      https://jw.hwec.edu.cn/                   ← 尾部斜杠
+      http://202.103.141.242:801                ← IP+端口
+    统一输出 scheme://netloc，比如 https://jw.hwec.edu.cn
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    parsed = urllib.parse.urlparse(raw)
+    # 必须有 scheme 和 netloc 才算合法 URL
+    if not parsed.scheme or not parsed.netloc:
+        # 可能用户只填了域名，补 https:// 再试
+        parsed = urllib.parse.urlparse(f"https://{raw}")
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
 class XiQueErAdapter(AcademicAdapter):
     """喜鹊儿 / 青果教务系统适配器（零第三方依赖）。"""
 
@@ -132,7 +156,8 @@ class XiQueErAdapter(AcademicAdapter):
 
     def __init__(self, base_url: str = "", school_code: str = "", **kwargs):
         super().__init__(**kwargs)
-        self.base_url = (base_url or "").rstrip("/")
+        # ⚠️ 归一化：不管用户粘了完整登录页 URL 还是域名，都提取 scheme://netloc
+        self.base_url = _normalize_base_url(base_url)
         self.school_code = school_code.strip()
         if not self.base_url and self.school_code and self.school_code in SCHOOL_PRESETS:
             self.base_url = SCHOOL_PRESETS[self.school_code]["base_url"]
@@ -154,25 +179,32 @@ class XiQueErAdapter(AcademicAdapter):
             raise AcademicAdapterError("缺少 username 或 password")
 
         def _do_login():
-            for attempt in range(3):  # 最多重试 3 次（偶尔服务器返回错误 HTML）
+            # 宿主单次请求有超时上限，这里严格控制：最多 2 次重试，每次 15s 超时
+            for attempt in range(2):
                 s = _HttpSession()
 
                 # 1) 登录页面
                 login_page_url = f"{self.base_url}/cas/login.action"
                 try:
-                    r = s.get(login_page_url, timeout=30)
-                except AcademicAdapterError:
-                    if attempt < 2:
+                    r = s.get(login_page_url, timeout=15)
+                except AcademicAdapterError as e:
+                    if attempt < 1:
                         continue
-                    raise
+                    raise AcademicAdapterError(
+                        f"无法访问教务系统（{self.base_url}），请检查地址是否正确或是否有网络连接。"
+                        f" 详细：{e}"
+                    )
                 if r.status_code != 200:
-                    if attempt < 2:
+                    if attempt < 1:
                         continue
-                    raise AcademicAdapterError(f"无法访问教务系统登录页：HTTP {r.status_code}（{login_page_url}）")
+                    raise AcademicAdapterError(
+                        f"无法访问教务系统登录页：HTTP {r.status_code}（{login_page_url}）。"
+                        f" 可能是 base_url 错误，应为教务系统根域名如 https://jw.hwec.edu.cn"
+                    )
 
                 # 检查是不是真的登录页（有时代理返回错误 HTML）
                 if "凭证已失效" in r.text or re.search(r'<script>alert\(', r.text[:2000]):
-                    if attempt < 2:
+                    if attempt < 1:
                         continue  # 重试
                     raise AcademicAdapterError(
                         "登录页被代理/网关拦截，返回了错误页面。"
@@ -182,7 +214,7 @@ class XiQueErAdapter(AcademicAdapter):
 
                 jsessionid = s.cookies_get("JSESSIONID")
                 if not jsessionid:
-                    if attempt < 2:
+                    if attempt < 1:
                         continue
                     raise AcademicAdapterError(
                         "登录页未返回 JSESSIONID。"
@@ -204,7 +236,7 @@ class XiQueErAdapter(AcademicAdapter):
                         break
 
                 if not session_id:
-                    if attempt < 2:
+                    if attempt < 1:
                         continue
                     raise AcademicAdapterError(
                         "无法从登录页提取 _sessionid（学校教务系统登录页格式可能不同）。"
@@ -213,14 +245,14 @@ class XiQueErAdapter(AcademicAdapter):
 
                 # 2) 动态参数
                 try:
-                    deskey = s.get(f"{self.base_url}/frame/homepage?method=getTempDeskey", timeout=30).text.strip()
-                    nowtime = s.get(f"{self.base_url}/frame/homepage?method=getTempNowtime", timeout=30).text.strip()
+                    deskey = s.get(f"{self.base_url}/frame/homepage?method=getTempDeskey", timeout=15).text.strip()
+                    nowtime = s.get(f"{self.base_url}/frame/homepage?method=getTempNowtime", timeout=15).text.strip()
                 except AcademicAdapterError:
-                    if attempt < 2:
+                    if attempt < 1:
                         continue
                     raise
                 if not deskey or not nowtime:
-                    if attempt < 2:
+                    if attempt < 1:
                         continue
                     raise AcademicAdapterError(
                         "获取 deskey/nowtime 失败，教务系统可能不可用。"
@@ -252,12 +284,12 @@ class XiQueErAdapter(AcademicAdapter):
                     "Accept": "application/json, text/javascript, */*; q=0.01",
                     "X-Requested-With": "XMLHttpRequest",
                 }
-                r = s.post(f"{self.base_url}/cas/logon.action", data=post_body, headers=headers, timeout=30)
+                r = s.post(f"{self.base_url}/cas/logon.action", data=post_body, headers=headers, timeout=15)
                 try:
                     result = r.json()
                 except Exception:
                     body_snippet = r.text[:500].replace("\n", " ").replace("\r", " ")
-                    if "凭证已失效" in body_snippet and attempt < 2:
+                    if "凭证已失效" in body_snippet and attempt < 1:
                         continue  # 凭证可能过期，重建 session 重试
                     raise AcademicAdapterError(
                         f"登录返回非 JSON（服务器返回了 HTML/脚本）。"
@@ -268,7 +300,7 @@ class XiQueErAdapter(AcademicAdapter):
                     msg = result.get("message", "未知错误")
                     code = result.get("status")
                     # 300 = 无效请求，可能是凭证过期 → 重试
-                    if str(code) in ("300", "500") and attempt < 2:
+                    if str(code) in ("300", "500") and attempt < 1:
                         continue
                     raise AcademicAdapterError(
                         f"登录失败：{msg} (code={code})"
@@ -276,8 +308,8 @@ class XiQueErAdapter(AcademicAdapter):
 
                 return s, username
 
-            # 超过 3 次重试
-            raise AcademicAdapterError("教务系统登录重试 3 次均失败，请稍后再试或检查网络")
+            # 超过 2 次重试
+            raise AcademicAdapterError("教务系统登录重试 2 次均失败，请稍后再试或检查网络")
 
         self._session, self._user_code = await _asyncio.to_thread(_do_login)
         assert self._session is not None
@@ -317,7 +349,7 @@ class XiQueErAdapter(AcademicAdapter):
             headers = {
                 "Referer": f"{self.base_url}/student/xkjg.wdkb.jsp?menucode=S20301",
             }
-            r = self._session.get(url, headers=headers, timeout=30)
+            r = self._session.get(url, headers=headers, timeout=15)
             if r.status_code != 200:
                 raise AcademicAdapterError(f"课表请求失败：HTTP {r.status_code}")
             return r.text
