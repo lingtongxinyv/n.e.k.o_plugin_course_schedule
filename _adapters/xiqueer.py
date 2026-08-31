@@ -57,10 +57,13 @@ class _HttpSession:
 
     def __init__(self):
         self.cookie_jar = http.cookiejar.CookieJar()
-        # 关键：ProxyHandler({}) 禁用所有代理（包括系统代理）
+        # 关键 1：ProxyHandler({}) 禁用所有代理（包括系统代理）
+        # 关键 2：HTTPSHandler(context=...) 把 SSL 跳过注入到 opener 里
+        # 注意：OpenerDirector.open() 不支持 context 参数，必须在这里绑定
         self.opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}),
             urllib.request.HTTPCookieProcessor(self.cookie_jar),
+            urllib.request.HTTPSHandler(context=_SSL_CTX),
         )
         self.last_status: int = 0
 
@@ -78,7 +81,7 @@ class _HttpSession:
             body_bytes = data.encode("utf-8") if isinstance(data, str) else data
         req = urllib.request.Request(url, data=body_bytes, headers=hdrs, method=method)
         try:
-            resp = self.opener.open(req, timeout=timeout, context=_SSL_CTX)
+            resp = self.opener.open(req, timeout=timeout)
             self.last_status = resp.status
             raw = resp.read()
             return _Response(raw, resp.status, dict(resp.headers))
