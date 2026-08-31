@@ -10,13 +10,22 @@
   GET /student/wsxk.xskcb10319.jsp?params=base64(xn+"+"+xq+"+"+xh)
   → 解析 table#mytable → 返回课程列表
 
-零第三方依赖：requests + 内置 jkingo_des + 正则解析 HTML。
+⚠️ 零第三方依赖：仅使用 Python 标准库
+  - urllib.request + http.cookiejar  替代 requests
+  - 内置 jkingo_des                  替代 execjs
+  - 正则解析 HTML                    替代 bs4
+  保证在任何 N.E.K.O 安装（自带 Python）中直接运行，无需 pip install。
 """
 from __future__ import annotations
 
 import base64
 import hashlib
+import http.cookiejar
+import json
 import re
+import ssl
+import urllib.error
+import urllib.request
 from typing import Any
 
 from .._academic_adapter import AcademicAdapter, AcademicAdapterError
@@ -28,9 +37,92 @@ SCHOOL_PRESETS: dict[str, dict[str, str]] = {
     "12623": {"title": "华南农业大学珠江学院", "base_url": "http://202.103.141.242:801"},
 }
 
+# 全局禁用 SSL 证书校验（国内学校 HTTPS 证书常不受信任）
+_SSL_CTX = ssl._create_unverified_context()
+
+# 全局默认 headers
+_DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+
+class _HttpSession:
+    """极简封装：用 urllib 模拟 requests.Session 的常用接口。
+
+    目的：让上层业务代码写法不变（.get() / .post() / .cookies.get() / .text / .json()），
+    但底层零第三方依赖。
+    """
+
+    def __init__(self):
+        self.cookie_jar = http.cookiejar.CookieJar()
+        # 关键：ProxyHandler({}) 禁用所有代理（包括系统代理）
+        self.opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPCookieProcessor(self.cookie_jar),
+        )
+        self.last_status: int = 0
+
+    def cookies_get(self, name: str) -> str | None:
+        for cookie in self.cookie_jar:
+            if cookie.name == name:
+                return cookie.value
+        return None
+
+    def _request(self, method: str, url: str, headers: dict | None = None,
+                 data: bytes | str | None = None, timeout: float = 30.0) -> "_Response":
+        hdrs = {**_DEFAULT_HEADERS, **(headers or {})}
+        body_bytes: bytes | None = None
+        if data is not None:
+            body_bytes = data.encode("utf-8") if isinstance(data, str) else data
+        req = urllib.request.Request(url, data=body_bytes, headers=hdrs, method=method)
+        try:
+            resp = self.opener.open(req, timeout=timeout, context=_SSL_CTX)
+            self.last_status = resp.status
+            raw = resp.read()
+            return _Response(raw, resp.status, dict(resp.headers))
+        except urllib.error.HTTPError as e:
+            self.last_status = e.code
+            raw = e.read() if hasattr(e, "read") else b""
+            return _Response(raw, e.code, dict(e.headers) if e.headers else {})
+        except urllib.error.URLError as e:
+            self.last_status = 0
+            raise AcademicAdapterError(f"网络请求失败：{e.reason}") from e
+
+    def get(self, url: str, headers: dict | None = None, timeout: float = 30.0) -> "_Response":
+        return self._request("GET", url, headers=headers, timeout=timeout)
+
+    def post(self, url: str, data: bytes | str | None = None,
+             headers: dict | None = None, timeout: float = 30.0) -> "_Response":
+        return self._request("POST", url, data=data, headers=headers, timeout=timeout)
+
+
+class _Response:
+    """模拟 requests.Response 的 .text / .status_code / .json() 接口。"""
+
+    def __init__(self, raw: bytes, status: int, headers: dict):
+        self._raw = raw
+        self.status_code = status
+        self.headers = headers
+
+    @property
+    def text(self) -> str:
+        # 学校服务器可能返回 GBK，先 UTF-8 试，再 GBK 兜底
+        try:
+            return self._raw.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                return self._raw.decode("gbk")
+            except Exception:
+                return self._raw.decode("utf-8", errors="replace")
+
+    def json(self) -> Any:
+        return json.loads(self.text)
+
 
 class XiQueErAdapter(AcademicAdapter):
-    """喜鹊儿 / 青果教务系统适配器。"""
+    """喜鹊儿 / 青果教务系统适配器（零第三方依赖）。"""
 
     adapter_id = "xiqueer"
     adapter_name = "喜鹊儿（青果教务）"
@@ -41,14 +133,14 @@ class XiQueErAdapter(AcademicAdapter):
         self.school_code = school_code.strip()
         if not self.base_url and self.school_code and self.school_code in SCHOOL_PRESETS:
             self.base_url = SCHOOL_PRESETS[self.school_code]["base_url"]
-        self._session = None
-        self._jsessionid = None
+        self._session: _HttpSession | None = None
+        self._jsessionid: str | None = None
         self._user_code: str | None = None
 
     # ── 认证 ──
 
     async def authenticate(self, creds: dict[str, Any]) -> None:
-        import requests as _requests  # 宿主应该已装
+        import asyncio as _asyncio
 
         username = str(creds.get("username") or "").strip()
         password = str(creds.get("password") or "").strip()
@@ -58,37 +150,18 @@ class XiQueErAdapter(AcademicAdapter):
         if not username or not password:
             raise AcademicAdapterError("缺少 username 或 password")
 
-        # 用 requests 同步调，再用 asyncio.to_thread 包装（entry point 是 async 的）
-        import asyncio as _asyncio
-
         def _do_login():
-            # ⚠️ 关键：requests 默认会读取 HTTP_PROXY/HTTPS_PROXY 环境变量。
-            # 学校内网代理可能会拦截 HTTPS 请求并返回虚假 HTML（如"凭证已失效"），
-            # 必须禁用代理 + 关闭 SSL 校验，让请求直连目标服务器。
-            import os as _os
-            _os.environ.pop("HTTP_PROXY", None)
-            _os.environ.pop("HTTPS_PROXY", None)
-            _os.environ.pop("http_proxy", None)
-            _os.environ.pop("https_proxy", None)
-            try:
-                import urllib3 as _urllib3
-                _urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)
-            except Exception:
-                pass
-
             for attempt in range(3):  # 最多重试 3 次（偶尔服务器返回错误 HTML）
-                s = _requests.Session()
-                s.trust_env = False    # 不信任环境变量里的代理设置
-                s.verify = False       # 国内学校 HTTPS 证书常常不受信任
-                s.headers.update({
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                })
+                s = _HttpSession()
 
                 # 1) 登录页面
                 login_page_url = f"{self.base_url}/cas/login.action"
-                r = s.get(login_page_url, timeout=30)
+                try:
+                    r = s.get(login_page_url, timeout=30)
+                except AcademicAdapterError:
+                    if attempt < 2:
+                        continue
+                    raise
                 if r.status_code != 200:
                     if attempt < 2:
                         continue
@@ -104,7 +177,7 @@ class XiQueErAdapter(AcademicAdapter):
                         f" 前300字：{r.text[:300]}"
                     )
 
-                jsessionid = s.cookies.get("JSESSIONID")
+                jsessionid = s.cookies_get("JSESSIONID")
                 if not jsessionid:
                     if attempt < 2:
                         continue
@@ -136,8 +209,13 @@ class XiQueErAdapter(AcademicAdapter):
                     )
 
                 # 2) 动态参数
-                deskey = s.get(f"{self.base_url}/frame/homepage?method=getTempDeskey", timeout=30).text.strip()
-                nowtime = s.get(f"{self.base_url}/frame/homepage?method=getTempNowtime", timeout=30).text.strip()
+                try:
+                    deskey = s.get(f"{self.base_url}/frame/homepage?method=getTempDeskey", timeout=30).text.strip()
+                    nowtime = s.get(f"{self.base_url}/frame/homepage?method=getTempNowtime", timeout=30).text.strip()
+                except AcademicAdapterError:
+                    if attempt < 2:
+                        continue
+                    raise
                 if not deskey or not nowtime:
                     if attempt < 2:
                         continue
@@ -161,11 +239,13 @@ class XiQueErAdapter(AcademicAdapter):
                 ).hexdigest()
                 params_v1_encoded = KingoDES.encrypt(params_v1, deskey)
 
-                post_body = f"params={params_v1_encoded}&token={token}&timestamp={nowtime}&deskey={deskey}&ssessionid={session_id}"
+                post_body = (
+                    f"params={params_v1_encoded}&token={token}&timestamp={nowtime}"
+                    f"&deskey={deskey}&ssessionid={session_id}"
+                )
                 headers = {
                     "Content-Type": "application/x-www-form-urlencoded",
                     "Referer": f"{self.base_url}/cas/login.action",
-                    "Cookie": f"JSESSIONID={jsessionid}",
                     "Accept": "application/json, text/javascript, */*; q=0.01",
                     "X-Requested-With": "XMLHttpRequest",
                 }
@@ -197,7 +277,8 @@ class XiQueErAdapter(AcademicAdapter):
             raise AcademicAdapterError("教务系统登录重试 3 次均失败，请稍后再试或检查网络")
 
         self._session, self._user_code = await _asyncio.to_thread(_do_login)
-        self._jsessionid = self._session.cookies.get("JSESSIONID")
+        assert self._session is not None
+        self._jsessionid = self._session.cookies_get("JSESSIONID")
         self._authenticated = True
 
     # ── 学期列表 ──
@@ -232,7 +313,6 @@ class XiQueErAdapter(AcademicAdapter):
             url = f"{self.base_url}/student/wsxk.xskcb10319.jsp?params={params_b64}"
             headers = {
                 "Referer": f"{self.base_url}/student/xkjg.wdkb.jsp?menucode=S20301",
-                "Cookie": f"JSESSIONID={self._jsessionid}",
             }
             r = self._session.get(url, headers=headers, timeout=30)
             if r.status_code != 200:
