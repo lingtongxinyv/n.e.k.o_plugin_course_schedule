@@ -1,4 +1,5 @@
 """教务系统适配器入口：列出可用适配器、从教务系统拉取并直接入库。"""
+
 from __future__ import annotations
 
 from plugin.sdk.plugin import Err, Ok, SdkError, plugin_entry
@@ -17,8 +18,7 @@ class AcademicRouter(PluginRouter):
     def repo(self):
         return self.main_plugin.repo
 
-    @plugin_entry(id="list_academic_adapters", name="教务适配器列表",
-                  description="列出所有可用的教务系统适配器")
+    @plugin_entry(id="list_academic_adapters", name="教务适配器列表", description="列出所有可用的教务系统适配器")
     async def list_academic_adapters(self, **_):
         return Ok({"adapters": list_adapters()})
 
@@ -46,8 +46,12 @@ class AcademicRouter(PluginRouter):
         },
     )
     async def import_from_academic(
-        self, adapter: str, username: str, password: str,
-        base_url: str = "", school_code: str = "",
+        self,
+        adapter: str,
+        username: str,
+        password: str,
+        base_url: str = "",
+        school_code: str = "",
         md5_password: str = "",
         semester_selector: dict | None = None,
         semester_id: int = 0,
@@ -72,8 +76,10 @@ class AcademicRouter(PluginRouter):
             stats = await _apply_normalized(self, data, int(semester_id or 0))
         except Exception as exc:
             return Err(SdkError(f"入库失败：{exc}"))
-        return Ok({
-            "adapter": adapter,
-            "semester_fetched": data.get("semester"),
-            "stats": stats,
-        })
+        return Ok(
+            {
+                "adapter": adapter,
+                "semester_fetched": data.get("semester"),
+                "stats": stats,
+            }
+        )

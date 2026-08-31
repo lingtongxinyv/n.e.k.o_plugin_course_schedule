@@ -4,6 +4,7 @@
 P1：学期管理、手动录入课程、今日/明日/本周/下节课查询、周数与进度。
 P2：上课提醒、作业/考试管理、倒计时。
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -31,7 +32,11 @@ _DEFAULT_TZ = "Asia/Shanghai"
 class CourseSchedulePlugin(NekoPluginBase):
     # 声明 router 类，供主进程静态扫描 entry 元数据（UI 面板依赖）
     __routers__ = [
-        ManageRouter, QueryRouter, TasksRouter, ImportExportRouter, AcademicRouter,
+        ManageRouter,
+        QueryRouter,
+        TasksRouter,
+        ImportExportRouter,
+        AcademicRouter,
     ]
 
     def __init__(self, ctx):
@@ -73,15 +78,19 @@ class CourseSchedulePlugin(NekoPluginBase):
                     seen.add(id(current))
                     if not hasattr(current, UI_ACTION_META_ATTR):
                         try:
-                            setattr(current, UI_ACTION_META_ATTR, {
-                                "id": entry_id,
-                                "label": entry_id,
-                                "tone": "default",
-                                "group": None,
-                                "order": 0,
-                                "confirm": False,
-                                "refresh_context": True,
-                            })
+                            setattr(
+                                current,
+                                UI_ACTION_META_ATTR,
+                                {
+                                    "id": entry_id,
+                                    "label": entry_id,
+                                    "tone": "default",
+                                    "group": None,
+                                    "order": 0,
+                                    "confirm": False,
+                                    "refresh_context": True,
+                                },
+                            )
                             did_set = True
                         except Exception:
                             pass
@@ -132,10 +141,17 @@ class CourseSchedulePlugin(NekoPluginBase):
             self.logger.exception("ensure_schema failed: {}", exc)
             return Ok({"status": "degraded", "error": str(exc)})
         sem_count = len(await self.repo.list_semesters())
-        self.logger.info("CourseSchedule started, tz={}, semesters={}, remind={}",
-                         self._tz, sem_count, self._remind_enabled)
-        return Ok({"status": "ready", "timezone": str(self._tz),
-                    "semesters": sem_count, "remind_enabled": self._remind_enabled})
+        self.logger.info(
+            "CourseSchedule started, tz={}, semesters={}, remind={}", self._tz, sem_count, self._remind_enabled
+        )
+        return Ok(
+            {
+                "status": "ready",
+                "timezone": str(self._tz),
+                "semesters": sem_count,
+                "remind_enabled": self._remind_enabled,
+            }
+        )
 
     @lifecycle(id="shutdown")
     async def on_shutdown(self, **_):
@@ -146,12 +162,18 @@ class CourseSchedulePlugin(NekoPluginBase):
     async def on_config_change(self, old_config, new_config, mode, **_):
         new = new_config or {}
         self._load_course_cfg(new)
-        self.logger.info("CourseSchedule config changed, mode={}, tz={}, remind={}",
-                         mode, self._tz, self._remind_enabled)
+        self.logger.info(
+            "CourseSchedule config changed, mode={}, tz={}, remind={}", mode, self._tz, self._remind_enabled
+        )
         return Ok({"status": "config_updated"})
 
-    @timer_interval(id="class_reminder_check", seconds=60, auto_start=True,
-                    name="上课提醒检查", description="每分钟检查是否有即将开始的课程并发送提醒")
+    @timer_interval(
+        id="class_reminder_check",
+        seconds=60,
+        auto_start=True,
+        name="上课提醒检查",
+        description="每分钟检查是否有即将开始的课程并发送提醒",
+    )
     async def check_upcoming_classes(self, **_):
         if not self._remind_enabled:
             return Ok({"skipped": "remind_disabled"})
@@ -216,8 +238,7 @@ class CourseSchedulePlugin(NekoPluginBase):
                     )
                     self._reminded.add(key)
                     reminded_count += 1
-                    self.logger.info("Class reminder sent: {} period {} ({}min)",
-                                    name, pno, minutes_until)
+                    self.logger.info("Class reminder sent: {} period {} ({}min)", name, pno, minutes_until)
                 except Exception as exc:
                     self.logger.exception("push_message failed: {}", exc)
 

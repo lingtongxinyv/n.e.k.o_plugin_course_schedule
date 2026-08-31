@@ -1,4 +1,5 @@
 """课程表插件数据库表结构。"""
+
 from __future__ import annotations
 
 import json

@@ -1,4 +1,5 @@
 """课程表时间 / 周次解析纯函数。"""
+
 from __future__ import annotations
 
 from datetime import date, datetime
@@ -56,11 +57,43 @@ def parse_weekday(value) -> int | None:
         return value if 1 <= value <= 7 else None
     s = str(value).strip()
     mapping = {
-        "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7,
-        "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7,
-        "周一": 1, "周二": 2, "周三": 3, "周四": 4, "周五": 5, "周六": 6, "周日": 7, "周天": 7,
-        "monday": 1, "tuesday": 2, "wednesday": 3, "thursday": 4, "friday": 5, "saturday": 6, "sunday": 7,
-        "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 7,
+        "1": 1,
+        "2": 2,
+        "3": 3,
+        "4": 4,
+        "5": 5,
+        "6": 6,
+        "7": 7,
+        "一": 1,
+        "二": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "日": 7,
+        "天": 7,
+        "周一": 1,
+        "周二": 2,
+        "周三": 3,
+        "周四": 4,
+        "周五": 5,
+        "周六": 6,
+        "周日": 7,
+        "周天": 7,
+        "monday": 1,
+        "tuesday": 2,
+        "wednesday": 3,
+        "thursday": 4,
+        "friday": 5,
+        "saturday": 6,
+        "sunday": 7,
+        "mon": 1,
+        "tue": 2,
+        "wed": 3,
+        "thu": 4,
+        "fri": 5,
+        "sat": 6,
+        "sun": 7,
     }
     return mapping.get(s.lower())
 

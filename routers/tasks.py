@@ -1,4 +1,5 @@
 """作业 / 考试 / 倒计时入口。"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -45,16 +46,20 @@ class TasksRouter(PluginRouter):
             "required": ["title"],
         },
     )
-    async def add_homework(self, title: str, course_id: int = 0, due_at: str = "",
-                           note: str = "", semester_id: int = 0, **_):
+    async def add_homework(
+        self, title: str, course_id: int = 0, due_at: str = "", note: str = "", semester_id: int = 0, **_
+    ):
         sem = await self.repo.get_active_semester()
         sem_ref = self._resolve_semester(sem, semester_id)
         if not sem_ref:
             return Err(SdkError("没有当前学期，请先 add_semester"))
         d = parse_date(due_at) if due_at else None
         rec = await self.repo.add_assignment(
-            semester_id=sem_ref["id"], kind="homework", title=title,
-            course_id=int(course_id) or None, due_at=str(d) if d else None,
+            semester_id=sem_ref["id"],
+            kind="homework",
+            title=title,
+            course_id=int(course_id) or None,
+            due_at=str(d) if d else None,
             note=note or None,
         )
         return Ok({"homework": rec})
@@ -78,8 +83,10 @@ class TasksRouter(PluginRouter):
         if not sem_ref:
             return Err(SdkError("没有当前学期"))
         rows = await self.repo.list_assignments(
-            semester_id=sem_ref["id"], kind="homework",
-            status=status or None, course_id=int(course_id) or None,
+            semester_id=sem_ref["id"],
+            kind="homework",
+            status=status or None,
+            course_id=int(course_id) or None,
         )
         today = datetime.now(self._tz()).date()
         for r in rows:
@@ -141,17 +148,29 @@ class TasksRouter(PluginRouter):
             "required": ["title"],
         },
     )
-    async def add_exam(self, title: str, course_id: int = 0, due_at: str = "",
-                       location: str = "", note: str = "", semester_id: int = 0, **_):
+    async def add_exam(
+        self,
+        title: str,
+        course_id: int = 0,
+        due_at: str = "",
+        location: str = "",
+        note: str = "",
+        semester_id: int = 0,
+        **_,
+    ):
         sem = await self.repo.get_active_semester()
         sem_ref = self._resolve_semester(sem, semester_id)
         if not sem_ref:
             return Err(SdkError("没有当前学期，请先 add_semester"))
         d = parse_date(due_at) if due_at else None
         rec = await self.repo.add_assignment(
-            semester_id=sem_ref["id"], kind="exam", title=title,
-            course_id=int(course_id) or None, due_at=str(d) if d else None,
-            location=location or None, note=note or None,
+            semester_id=sem_ref["id"],
+            kind="exam",
+            title=title,
+            course_id=int(course_id) or None,
+            due_at=str(d) if d else None,
+            location=location or None,
+            note=note or None,
         )
         return Ok({"exam": rec})
 
@@ -173,7 +192,9 @@ class TasksRouter(PluginRouter):
         if not sem_ref:
             return Err(SdkError("没有当前学期"))
         rows = await self.repo.list_assignments(
-            semester_id=sem_ref["id"], kind="exam", status=status or None,
+            semester_id=sem_ref["id"],
+            kind="exam",
+            status=status or None,
         )
         today = datetime.now(self._tz()).date()
         for r in rows:
@@ -254,13 +275,16 @@ class TasksRouter(PluginRouter):
             parts.append(f"当前第 {wn}/{total} 周")
         summary = "；".join(parts) if parts else "暂无即将到来的考试或作业"
 
-        return Ok({
-            "today": today.isoformat(),
-            "days_until_next_exam": days_exam,
-            "next_exam": next_exam,
-            "days_until_next_homework": days_hw,
-            "next_homework": next_hw,
-            "days_until_semester_end": days_end,
-            "week": wn, "total_weeks": total,
-            "summary": summary,
-        })
+        return Ok(
+            {
+                "today": today.isoformat(),
+                "days_until_next_exam": days_exam,
+                "next_exam": next_exam,
+                "days_until_next_homework": days_hw,
+                "next_homework": next_hw,
+                "days_until_semester_end": days_end,
+                "week": wn,
+                "total_weeks": total,
+                "summary": summary,
+            }
+        )

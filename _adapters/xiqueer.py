@@ -1,14 +1,24 @@
-"""XiQueEr（喜鹊儿 / 青果教务系统）适配器。
+"""XiQueEr（喜鹊儿 / 青果 KingoSOFT 教务系统）适配器 v2。
 
-学校教务系统 URL 通常形如 https://jw.hwec.edu.cn/cas/login.action
+改进点（对比 v1）：
+1. 更鲁棒的 _sessionid 提取（覆盖 kingosoft.js 中所有变体）
+2. deskey/nowtime 多路径探测（部分学校部署了非标准路径）
+3. 课表 API 端点版本探测（青果 2.x / 3.x / 4.x 路径不同）
+4. 完整移植 Dawn-Course kingosoft.js 的 HTML 解析逻辑，
+   包含 parseListTable（列表型课表）、parseWithLegacyLogic（旧版兜底）
+5. 更细粒度的错误诊断，让用户可以自排障
+
+依赖：纯标准库（urllib / http.cookiejar / hashlib / base64 / re / ssl / json），
+符合 N.E.K.O 插件零第三方依赖的发布要求。
 """
+
+from __future__ import annotations
 
 import asyncio
 import base64
 import hashlib
 import http.cookiejar
 import json
-import os
 import re
 import ssl
 import urllib.parse
@@ -19,24 +29,24 @@ from .._academic_adapter import AcademicAdapter, AcademicAdapterError
 from .jkingo_des import KingoDES
 
 # ---------------------------------------------------------------------------
-# SSL / 请求层：零第三方依赖，全标准库
+# SSL / HTTP 层
 # ---------------------------------------------------------------------------
 
 _SSL_CTX = ssl._create_unverified_context()
 
 _DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
 
 
 class _HttpSession:
-    """极简封装：用 urllib 模拟 requests.Session 的常用接口。"""
+    """极简 urllib Session 封装，自动维护 CookieJar。"""
 
     def __init__(self):
         self.cookie_jar = http.cookiejar.CookieJar()
-        # 关键：ProxyHandler({}) 禁用所有代理 + HTTPSHandler 跳过证书
         self.opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}),
             urllib.request.HTTPCookieProcessor(self.cookie_jar),
@@ -45,13 +55,14 @@ class _HttpSession:
         self.last_status: int = 0
 
     def cookies_get(self, name: str) -> str | None:
-        for cookie in self.cookie_jar:
-            if cookie.name == name:
-                return cookie.value
+        for c in self.cookie_jar:
+            if c.name == name:
+                return c.value
         return None
 
-    def _request(self, method: str, url: str, headers: dict | None = None,
-                 data: bytes | str | None = None, timeout: float = 10.0) -> "_Response":
+    def _request(
+        self, method: str, url: str, headers: dict | None = None, data: bytes | str | None = None, timeout: float = 10.0
+    ) -> "_Response":
         hdrs = {**_DEFAULT_HEADERS, **(headers or {})}
         body_bytes: bytes | None = None
         if data is not None:
@@ -60,20 +71,16 @@ class _HttpSession:
         try:
             resp = self.opener.open(req, timeout=timeout)
             self.last_status = resp.status
-            raw = resp.read()
-            return _Response(raw, resp.status, dict(resp.headers))
+            return _Response(resp.read(), resp.status, dict(resp.headers))
         except urllib.error.HTTPError as e:
             self.last_status = e.code
             raw = e.read() if hasattr(e, "read") else b""
             return _Response(raw, e.code, dict(e.headers) if e.headers else {})
         except urllib.error.URLError as e:
             self.last_status = 0
-            reason = getattr(e, "reason", e)
-            # 尝试连接看是否是代理/网络问题
             raise AcademicAdapterError(
-                f"网络请求失败：{reason}。"
-                f" 请检查教务系统地址是否正确、网络是否通畅，"
-                f"或尝试关闭系统代理后重试。"
+                f"网络请求失败：{getattr(e, 'reason', e)}。"
+                "请检查教务系统地址是否正确、网络是否通畅，或关闭系统代理后重试。"
             ) from e
         except Exception as e:
             self.last_status = 0
@@ -82,14 +89,13 @@ class _HttpSession:
     def get(self, url: str, headers: dict | None = None, timeout: float = 10.0) -> "_Response":
         return self._request("GET", url, headers=headers, timeout=timeout)
 
-    def post(self, url: str, data: bytes | str | None = None,
-             headers: dict | None = None, timeout: float = 10.0) -> "_Response":
+    def post(
+        self, url: str, data: bytes | str | None = None, headers: dict | None = None, timeout: float = 10.0
+    ) -> "_Response":
         return self._request("POST", url, data=data, headers=headers, timeout=timeout)
 
 
 class _Response:
-    """模拟 requests.Response 的 .text / .status_code / .json() 接口。"""
-
     def __init__(self, raw: bytes, status: int, headers: dict):
         self._raw = raw
         self.status_code = status
@@ -97,20 +103,18 @@ class _Response:
 
     @property
     def text(self) -> str:
-        try:
-            return self._raw.decode("utf-8")
-        except UnicodeDecodeError:
+        for enc in ("utf-8", "gbk", "gb2312", "gb18030"):
             try:
-                return self._raw.decode("gbk")
-            except Exception:
-                return self._raw.decode("utf-8", errors="replace")
+                return self._raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+        return self._raw.decode("utf-8", errors="replace")
 
     def json(self) -> Any:
         return json.loads(self.text)
 
 
 def _normalize_base_url(raw: str) -> str:
-    """把用户可能输入的各种 URL 形式统一成教务系统根域名 scheme://netloc。"""
     raw = (raw or "").strip()
     if not raw:
         return ""
@@ -123,40 +127,90 @@ def _normalize_base_url(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# XiQueEr 适配器主体
+# XiQueErAdapter 主体
 # ---------------------------------------------------------------------------
+
+# 登录页提取 _sessionid 的正则集合（按匹配置信度排序）
+_SESSION_ID_PATTERNS = [
+    r'var\s+_sessionid\s*=\s*["\']([A-Fa-f0-9]+)["\']',
+    r'var\s+sessionid\s*=\s*["\']([A-Fa-f0-9]+)["\']',
+    r'_sessionid\s*[:=]\s*["\']([A-Fa-f0-9]+)["\']',
+    r'var\s+sessionId\s*=\s*["\']([A-Fa-f0-9]+)["\']',
+    r'var\s+_SESSIONID\s*=\s*["\']([A-Fa-f0-9]+)["\']',
+    r'sessionId\s*[:=]\s*["\']([A-Fa-f0-9]+)["\']',
+    r"_sessionid[^\w]+([A-Fa-f0-9]{24,64})",
+    r"sessionid[^\w]+([A-Fa-f0-9]{24,64})",
+    r"_session_id[^\w]+([A-Fa-f0-9]{24,64})",
+]
+
+# deskey / nowtime 备选路径（有些学校改过路由名）
+_DESKEY_PATHS = [
+    "/frame/homepage?method=getTempDeskey",
+    "/frame/homepage.html?method=getTempDeskey",
+    "/frame/homepage.action?method=getTempDeskey",
+    "/homepage?method=getTempDeskey",
+    "/cas/frame/homepage?method=getTempDeskey",
+]
+_NOWTIME_PATHS = [
+    "/frame/homepage?method=getTempNowtime",
+    "/frame/homepage.html?method=getTempNowtime",
+    "/frame/homepage.action?method=getTempNowtime",
+    "/homepage?method=getTempNowtime",
+    "/cas/frame/homepage?method=getTempNowtime",
+]
+
+# 课表 JSON API 端点（青果不同版本路径不同）
+_KB_JSON_APIS = [
+    # 青果标准版（最常用）
+    ("/xskbcx!getKbxxByXs", "query.xnxq", "query.xsh"),
+    ("/xskbcx/getKbxxByXs", "query.xnxq", "query.xsh"),
+    ("/xskbcx.action?method=getKbxxByXs", "query.xnxq", "query.xsh"),
+    # 青果新版 API
+    ("/api/course/schedule", "semester", "studentId"),
+    ("/api/xskbcx/schedule", "xnxq", "xsh"),
+    ("/student/xskbcx!getKbxxByXs", "query.xnxq", "query.xsh"),
+    ("/cas/xskbcx!getKbxxByXs", "query.xnxq", "query.xsh"),
+]
+
+# 课表 HTML 页面路径
+_KB_HTML_PAGES = [
+    "/student/wsxk.xskcb10319.jsp",
+    "/cas/student/wsxk.xskcb10319.jsp",
+    "/student/xskbcx!xsKbView.action",
+    "/cas/student/xskbcx!xsKbView.action",
+    "/student/xskbcx.action?method=xsKbView",
+    "/znpk/Pri_StuSel.aspx",
+    "/ZNPK/Pri_StuSel.aspx",
+    "/jwglxt/xskbcx!xsKbView.action",
+]
 
 
 class XiQueErAdapter(AcademicAdapter):
-    """喜鹊儿 / 青果教务系统适配器。
+    """喜鹊儿 / 青果 KingoSOFT 教务系统适配器 v2。
 
-    登录流程（基于 KingoSOFT 青果教务公开算法）：
-        GET  /cas/login.action
-        GET  /frame/homepage?method=getTempDeskey
-        GET  /frame/homepage?method=getTempNowtime
-        POST /cas/logon.action  (加密后的 JSON)
-    抓课：
-        GET  /xskbcx!getKbxxByXs?query.xnxq=...&query.xsh=...&query.kbzc=...
+    登录流程：
+      1. GET /cas/login.action       → 取 JSESSIONID + _sessionid
+      2. GET getTempDeskey            → 取 DES 密钥（多路径探测）
+      3. GET getTempNowtime           → 取时间戳（多路径探测）
+      4. POST /cas/logon.action       → KingoDES 加密后的 JSON
+
+    抓课：先试 JSON API（多版本探测），失败上 HTML 页面（Dawn-Course kingosoft.js 同款解析）。
     """
 
     adapter_id = "xiqueer"
-    adapter_name = "喜鹊儿（青果教务）"
-    website = "https://jw.hwec.edu.cn"
+    adapter_name = "喜鹊儿（青果 KingoSOFT）"
 
     def __init__(self, **kwargs):
-        # get_adapter("xiqueer", base_url=..., school_code=...) 会把参数透传给 __init__
         self.base_url: str = (kwargs.get("base_url") or "").rstrip("/")
         self._session: _HttpSession | None = None
         self._username: str = ""
         self._semester_keyword: str = ""
-        # base_url 先归一化（去掉可能的 /cas/login.action 后缀）
         if self.base_url:
             self.base_url = _normalize_base_url(self.base_url)
 
-    # ---- authenticate ------------------------------------------------------
+    # ── authenticate ────────────────────────────────────────────────────────
 
     async def authenticate(self, creds: dict[str, Any]) -> None:
-        # 优先级：creds 里传的 base_url 最优先，其次用 __init__ 里存好的 self.base_url
         raw_base = creds.get("base_url") or creds.get("website") or self.base_url
         self.base_url = _normalize_base_url(raw_base)
         username = (creds.get("username") or creds.get("student_id") or "").strip()
@@ -164,92 +218,73 @@ class XiQueErAdapter(AcademicAdapter):
         md5_password = creds.get("md5_password")
 
         if not self.base_url:
-            raise AcademicAdapterError("缺少 base_url（教务系统地址），如 https://jw.hwec.edu.cn")
+            raise AcademicAdapterError(
+                "缺少 base_url（教务系统地址）。示例：https://jw.hwec.edu.cn 或 https://jw.example.edu.cn"
+            )
         if not username or not password:
-            raise AcademicAdapterError("缺少 username 或 password")
+            raise AcademicAdapterError("缺少 username（学号）或 password（密码）")
 
-        # 宿主超时限制：同步跑，单次 timeout 8s，串行但快速
         loop = asyncio.get_running_loop()
-        s, user = await loop.run_in_executor(None, self._do_login_sync, self.base_url, username, password, md5_password)
-
-        self._session = s
+        sess, user = await loop.run_in_executor(
+            None, self._do_login_sync, self.base_url, username, password, md5_password
+        )
+        self._session = sess
         self._username = user
 
     def _do_login_sync(self, base_url: str, username: str, password: str, md5_password: str | None):
-        """同步登录（由 run_in_executor 调用，避免阻塞事件循环）。"""
-        T = 5  # 极限：宿主 entry 硬限 30s，登录 + 抓课共享这个时间
+        T = 8  # 单请求 timeout
         s = _HttpSession()
-        print(f"[xiqueer.login] START base={base_url} user={username}", flush=True)
+        _l(f"[xiqueer.login] START base={base_url} user={username}")
 
-        # 1) 登录页面
-        login_page_url = f"{base_url}/cas/login.action"
-        r = s.get(login_page_url, timeout=T)
-        print(f"[xiqueer.login] login_page status={r.status_code} cookies={[c.name for c in s.cookie_jar]}", flush=True)
+        # 1) 登录页
+        login_url = f"{base_url}/cas/login.action"
+        r = s.get(login_url, timeout=T)
+        _l(f"[xiqueer.login] login_page status={r.status_code} cookies={[c.name for c in s.cookie_jar]}")
         if r.status_code != 200:
             raise AcademicAdapterError(
                 f"无法访问教务系统登录页：HTTP {r.status_code}。"
-                f" 地址应为根域名如 https://jw.hwec.edu.cn，"
-                f"不要在后面加 /cas/login.action"
+                f"地址应为根域名如 https://jw.example.edu.cn，不要加 /cas/login.action"
             )
 
         if "凭证已失效" in r.text or "<script>alert('温馨提示" in r.text[:2000]:
             raise AcademicAdapterError(
-                "登录页被拦截，返回了错误页面。"
-                "请检查网络/校园网环境或关闭系统代理后重试。"
-                f" 前200字：{r.text[:200]}"
+                "登录页被拦截（可能触发 WAF 或网络不通）。"
+                "请检查网络/校园网环境，关闭系统代理后重试。"
+                f"前300字：{r.text[:300]}"
             )
 
         jsessionid = s.cookies_get("JSESSIONID")
         if not jsessionid:
+            # 部分学校用 ASP.NET_SessionId / 自定义 cookie
+            jsessionid = s.cookies_get("ASP.NET_SessionId") or s.cookies_get("SESSION")
+        if not jsessionid:
             raise AcademicAdapterError(
-                f"登录页未返回 JSESSIONID。"
-                f" 前200字：{r.text[:200]}"
+                f"登录页未返回 JSESSIONID（或 ASP.NET_SessionId）。可能不是青果教务系统。前200字：{r.text[:200]}"
             )
 
         session_id = None
-        for pat in (
-            r'var\s+_sessionid\s*=\s*"([A-Fa-f0-9]+)"',
-            r"var\s+_sessionid\s*=\s*'([A-Fa-f0-9]+)'",
-            r"var\s+sessionid\s*=\s*['\"]([A-Fa-f0-9]+)['\"]",
-            r'_sessionid["\']?\s*[:=]\s*["\']([A-Fa-f0-9]+)["\']',
-        ):
+        for pat in _SESSION_ID_PATTERNS:
             m = re.search(pat, r.text)
             if m:
                 session_id = m.group(1)
+                _l(f"[xiqueer.login] session_id matched by /{pat[:40]}.../")
                 break
+        if not session_id:
+            # 终极尝试：抓取所有疑似十六进制长串
+            hex_candidates = re.findall(r'["\']([A-Fa-f0-9]{24,64})["\']', r.text)
+            if hex_candidates:
+                session_id = hex_candidates[0]
+                _l(f"[xiqueer.login] session_id fallback from hex candidate: {session_id[:16]}...")
         if not session_id:
             raise AcademicAdapterError(
                 "无法从登录页提取 _sessionid。"
-                f" 前300字：{r.text[:300]}"
+                "可能是旧版青果或非青果教务系统。"
+                f"请把登录页前500字发给开发者分析：{r.text[:500]}"
             )
 
-        # 2) deskey + nowtime — 串行但独立，任一失败都明确报错
-        deskey_r = s.get(f"{base_url}/frame/homepage?method=getTempDeskey", timeout=T)
-        if deskey_r.status_code != 200 or not deskey_r.text.strip():
-            body = deskey_r.text.strip()[:100] if deskey_r.text else "(empty)"
-            raise AcademicAdapterError(
-                f"获取 deskey 失败（HTTP {deskey_r.status_code}）：{body}"
-            )
-        deskey = deskey_r.text.strip()
-        if "凭证已失效" in deskey:
-            raise AcademicAdapterError(
-                "deskey 接口返回了错误页面（凭证失效）。"
-                "可能是登录页 cookie / session 未正确建立，"
-                "请完全退出 N.E.K.O 重启后再试。"
-            )
-
-        nowtime_r = s.get(f"{base_url}/frame/homepage?method=getTempNowtime", timeout=T)
-        if nowtime_r.status_code != 200 or not nowtime_r.text.strip():
-            body = nowtime_r.text.strip()[:100] if nowtime_r.text else "(empty)"
-            raise AcademicAdapterError(
-                f"获取 nowtime 失败（HTTP {nowtime_r.status_code}）：{body}"
-            )
-        nowtime = nowtime_r.text.strip()
-        if "凭证已失效" in nowtime:
-            raise AcademicAdapterError(
-                "nowtime 接口返回了错误页面（凭证失效）。"
-                "请完全退出 N.E.K.O 重启后再试。"
-            )
+        # 2) deskey + nowtime — 多路径探测
+        deskey = self._probe_get(s, base_url, _DESKEY_PATHS, T, "deskey")
+        nowtime = self._probe_get(s, base_url, _NOWTIME_PATHS, T, "nowtime")
 
         # 3) 组装登录参数
         params_u = base64.b64encode(f"{username};;{session_id}".encode()).decode()
@@ -267,8 +302,7 @@ class XiQueErAdapter(AcademicAdapter):
         params_v1_encoded = KingoDES.encrypt(params_v1, deskey)
 
         post_body = (
-            f"params={params_v1_encoded}&token={token}&timestamp={nowtime}"
-            f"&deskey={deskey}&ssessionid={session_id}"
+            f"params={params_v1_encoded}&token={token}&timestamp={nowtime}&deskey={deskey}&ssessionid={session_id}"
         )
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
@@ -277,39 +311,69 @@ class XiQueErAdapter(AcademicAdapter):
             "X-Requested-With": "XMLHttpRequest",
         }
         r = s.post(f"{base_url}/cas/logon.action", data=post_body, headers=headers, timeout=T)
-        print(f"[xiqueer.login] logon status={r.status_code} resp={r.text[:200]!r}", flush=True)
+        _l(f"[xiqueer.login] logon status={r.status_code} resp={r.text[:200]!r}")
+
         try:
             result = r.json()
         except Exception:
             body_snippet = r.text[:500].replace("\n", " ").replace("\r", " ")
-            raise AcademicAdapterError(
-                f"登录返回非 JSON：{body_snippet}"
-            )
-        if str(result.get("status")) != "200":
-            raise AcademicAdapterError(
-                f"登录失败：{result.get('message', '未知错误')} (code={result.get('status')})"
-            )
-        print(f"[xiqueer.login] SUCCESS! cookies_after={[c.name for c in s.cookie_jar]}", flush=True)
+            raise AcademicAdapterError(f"登录返回非 JSON：{body_snippet}")
 
-        return s, username
+        status = str(result.get("status", ""))
+        if status in ("200", "0", "1"):
+            _l(f"[xiqueer.login] SUCCESS! cookies={[c.name for c in s.cookie_jar]}")
+            return s, username
 
-    # ---- fetch_semesters ---------------------------------------------------
+        # 尝试兼容其他状态码
+        message = result.get("message") or result.get("msg") or result.get("error") or ""
+        raise AcademicAdapterError(f"登录失败：{message or '未知错误'} (status={status})。请检查账号密码是否正确。")
+
+    @staticmethod
+    def _probe_get(s: _HttpSession, base_url: str, paths: list[str], timeout: float, label: str) -> str:
+        """按顺序尝试多个路径，返回第一个有效响应的文本。"""
+        tried: list[str] = []
+        for p in paths:
+            url = f"{base_url}{p}"
+            tried.append(url)
+            try:
+                r = s.get(url, timeout=timeout)
+                text = r.text.strip()
+                if (
+                    r.status_code == 200
+                    and text
+                    and len(text) >= 8
+                    and "凭证已失效" not in text
+                    and "无效访问" not in text[:100]
+                ):
+                    _l(f"[xiqueer.login] {label} OK via {p} → {text[:30]}...")
+                    return text
+            except Exception as e:
+                _l(f"[xiqueer.login] {label} probe {p} EXC={e}")
+                continue
+        raise AcademicAdapterError(
+            f"获取 {label} 失败。已尝试：{tried}"
+            f"。可能该学校使用非标准青果部署或需要额外的 Cookie。"
+            "请确认教务系统地址正确，或联系开发者排查。"
+        )
+
+    # ── fetch_semesters ─────────────────────────────────────────────────────
 
     async def fetch_semesters(self) -> list[dict]:
-        """喜鹊儿不暴露学期列表接口，这里根据当前日期 + 用户填的 keyword 生成。"""
         from datetime import date
+
         today = date.today()
         year = today.year
-
         if 9 <= today.month <= 12:
             sy, ny, term = year, year + 1, "1"
         else:
             sy, ny, term = year - 1, year, "2"
 
         if term == "1":
-            start = date(sy, 9, 1); end = date(ny, 1, 15)
+            start = date(sy, 9, 1)
+            end = date(ny, 1, 15)
         else:
-            start = date(ny, 2, 25); end = date(ny, 7, 15)
+            start = date(ny, 2, 25)
+            end = date(ny, 7, 15)
 
         kw = getattr(self, "_semester_keyword", "")
         if kw:
@@ -318,40 +382,40 @@ class XiQueErAdapter(AcademicAdapter):
                 ky = int(m.group(1))
                 if "秋" in kw:
                     sy, ny, term = ky, ky + 1, "1"
-                    start = date(sy, 9, 1); end = date(ny, 1, 15)
+                    start = date(sy, 9, 1)
+                    end = date(ny, 1, 15)
                 elif "春" in kw:
                     sy, ny, term = ky - 1, ky, "2"
-                    start = date(ny, 2, 25); end = date(ny, 7, 15)
+                    start = date(ny, 2, 25)
+                    end = date(ny, 7, 15)
 
         tw = int((end - start).days / 7) + 1
-        return [{
-            "name": f"{sy}-{ny} 第{'一' if term == '1' else '二'}学期",
-            "start_date": start.isoformat(),
-            "end_date": end.isoformat(),
-            "total_weeks": tw,
-            "adapter_id": f"{sy}-{term}",
-            "school_year": str(sy),
-            "term": term,
-        }]
+        return [
+            {
+                "name": f"{sy}-{ny} 第{'一' if term == '1' else '二'}学期",
+                "start_date": start.isoformat(),
+                "end_date": end.isoformat(),
+                "total_weeks": tw,
+                "adapter_id": f"{sy}-{term}",
+                "school_year": str(sy),
+                "term": term,
+            }
+        ]
 
     async def select_semester(self, semester_selector: dict) -> None:
-        """把 keyword 存到实例上，供 fetch_semesters() 使用。"""
         if semester_selector and semester_selector.get("keyword"):
             self._semester_keyword = semester_selector["keyword"]
 
-    # ---- fetch_courses -----------------------------------------------------
+    # ── fetch_courses ───────────────────────────────────────────────────────
 
     async def fetch_courses(self, semester_info: dict) -> list[dict]:
         if not self._session:
             raise AcademicAdapterError("未登录，请先 authenticate")
-
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._do_fetch_courses_sync, semester_info)
 
     def _do_fetch_courses_sync(self, semester_info: dict) -> list[dict]:
-        """同步抓课：先试 JSON API，失败直接上 HTML 课表页面（喜鹊儿标准版）。"""
-        T = 5  # 单次 timeout
-
+        T = 8
         username = self._username
         sy = semester_info.get("school_year", "")
         term = semester_info.get("term", "1")
@@ -360,114 +424,110 @@ class XiQueErAdapter(AcademicAdapter):
         except Exception:
             next_sy = sy
 
-        xnxq = f"{sy}-{next_sy}-{term}"  # 2025-2026-1
-        print(f"[xiqueer.fetch] base={self.base_url} username={username} xnxq={xnxq}", flush=True)
+        xnxq = f"{sy}-{next_sy}-{term}"
+        _l(f"[xiqueer.fetch] base={self.base_url} user={username} xnxq={xnxq}")
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": _DEFAULT_HEADERS["User-Agent"],
             "Accept": "*/*",
             "X-Requested-With": "XMLHttpRequest",
         }
 
-        # ---- 1. 先试 JSON API（2 次，最快判断登录态） ----
-        api_url = f"{self.base_url}/xskbcx!getKbxxByXs"
-        common_query = "jsxx,jc,jc2,cd,zc,dwmc,xnxqm,xsksxm,xsdm,xsm,xxm,xjx,xsks,pym,zb,zs"
-        for method, params in [
-            ("GET", {"query.xnxq": xnxq, "query.xsh": username, "query.kbzc": common_query}),
-            ("POST", {"query.xnxq": xnxq, "query.xsh": username, "query.kbzc": common_query}),
-        ]:
-            qs = urllib.parse.urlencode(params)
-            try:
-                url = f"{api_url}?{qs}" if method == "GET" else api_url
-                data = qs if method == "POST" else None
-                r = self._session.get(url, data=data, headers=headers, timeout=T) \
-                    if method == "GET" else \
-                    self._session.post(api_url, data=qs, headers=headers, timeout=T)
-                text = r.text.strip()
-                print(f"[xiqueer.fetch] JSON-API {method} status={r.status_code} "
-                      f"first200={text[:200]!r}", flush=True)
-                if r.status_code == 200 and "凭证已失效" not in text and "无效访问请求" not in text[:500]:
-                    try:
-                        raw = r.json()
-                    except Exception:
-                        raw = None
-                    if raw:
+        # ---- 1. JSON API 探测（多端点 × GET/POST） ----
+        kbzc_common = "jsxx,jc,jc2,cd,zc,dwmc,xnxqm,xsksxm,xsdm,xsm,xxm,xjx,xsks,pym,zb,zs"
+        for api_path, xnxq_key, xsh_key in _KB_JSON_APIS:
+            for method in ("GET", "POST"):
+                params = {xnxq_key: xnxq, xsh_key: username}
+                if "kbzc" in api_path:
+                    params["query.kbzc"] = kbzc_common
+                qs = urllib.parse.urlencode(params)
+                try:
+                    if method == "GET":
+                        r = self._session.get(f"{self.base_url}{api_path}?{qs}", headers=headers, timeout=T)
+                    else:
+                        r = self._session.post(
+                            f"{self.base_url}{api_path}",
+                            data=qs,
+                            headers={**headers, "Content-Type": "application/x-www-form-urlencoded"},
+                            timeout=T,
+                        )
+                    text = r.text.strip()
+                    _l(f"[xiqueer.fetch] JSON {method} {api_path} status={r.status_code} first200={text[:200]!r}")
+                    if (
+                        r.status_code == 200
+                        and text
+                        and "凭证已失效" not in text
+                        and "无效访问" not in text[:500]
+                        and not text.startswith("<")  # 不是 HTML
+                        and not text.startswith("<!")
+                    ):
+                        try:
+                            raw = r.json()
+                        except Exception:
+                            continue
                         courses = self._parse_course_payload(raw)
                         if courses:
-                            print(f"[xiqueer.fetch] JSON-API SUCCESS! {len(courses)} courses", flush=True)
-                            return courses
-            except Exception as e:
-                print(f"[xiqueer.fetch] JSON-API {method} EXC={e}", flush=True)
-
-        # ---- 2. 直接上 HTML 课表页面（喜鹊儿标准版路径 /student/wsxk.xskcb10319.jsp） ----
-        html_urls = [
-            f"{self.base_url}/student/wsxk.xskcb10319.jsp",
-            f"{self.base_url}/cas/student/wsxk.xskcb10319.jsp",
-            f"{self.base_url}/student/xskbcx!xsKbView.action",
-            f"{self.base_url}/znpk/Pri_StuSel.aspx",
-        ]
-        for hu in html_urls:
-            for params in [
-                {"xn": sy, "xq": term, "xh": username, "xsh": username, "xnxq": xnxq},
-                {"xn": sy, "xq": term, "xh": username},
-            ]:
-                try:
-                    qs = urllib.parse.urlencode({k: v for k, v in params.items() if v})
-                    r = self._session.get(f"{hu}?{qs}", headers={
-                        "User-Agent": headers["User-Agent"],
-                        "Accept": "text/html,*/*",
-                        "Referer": f"{self.base_url}/cas/index.action",
-                    }, timeout=T)
-                    text = r.text
-                    print(f"[xiqueer.fetch] HTML {hu.split('/')[-1]} status={r.status_code} "
-                          f"len={len(text)} first300={text[:300]!r}", flush=True)
-                    if (r.status_code == 200 and len(text) > 2000
-                            and "登录" not in text[:300]
-                            and "凭证已失效" not in text[:300]
-                            and "无效访问请求" not in text[:500]):
-                        courses = self._parse_kb_html(text)
-                        if courses:
-                            print(f"[xiqueer.fetch] HTML SUCCESS! {len(courses)} courses", flush=True)
+                            _l(f"[xiqueer.fetch] JSON SUCCESS via {api_path}! {len(courses)} courses")
                             return courses
                 except Exception as e:
-                    print(f"[xiqueer.fetch] HTML EXC={e}", flush=True)
+                    _l(f"[xiqueer.fetch] JSON {method} {api_path} EXC={e}")
+                    continue
+
+        # ---- 2. HTML 页面（Dawn-Course kingosoft.js 同款解析） ----
+        for html_path in _KB_HTML_PAGES:
+            url = f"{self.base_url}{html_path}"
+            for qs_prefix in ("", f"?xn={sy}&xq={term}&xh={username}&xsh={username}&xnxq={xnxq}"):
+                try:
+                    r = self._session.get(
+                        f"{url}{qs_prefix}",
+                        headers={
+                            "User-Agent": headers["User-Agent"],
+                            "Accept": "text/html,*/*",
+                            "Referer": f"{self.base_url}/cas/index.action",
+                        },
+                        timeout=T,
+                    )
+                    text = r.text
+                    _l(
+                        f"[xiqueer.fetch] HTML {html_path}{qs_prefix} status={r.status_code} "
+                        f"len={len(text)} first300={text[:300]!r}"
+                    )
+                    if (
+                        r.status_code == 200
+                        and len(text) > 1500
+                        and "登录" not in text[:300]
+                        and "凭证已失效" not in text[:300]
+                        and "无效访问" not in text[:500]
+                        and ("<tr" in text or "<TR" in text)
+                    ):
+                        courses = self._parse_kb_html(text)
+                        if courses:
+                            _l(f"[xiqueer.fetch] HTML SUCCESS via {html_path}! {len(courses)} courses")
+                            return courses
+                except Exception as e:
+                    _l(f"[xiqueer.fetch] HTML {html_path}{qs_prefix} EXC={e}")
                     continue
 
         raise AcademicAdapterError(
             "课表 API 和 HTML 页面均未返回有效数据。"
-            "请查看日志面板中 [xiqueer.fetch] 开头的调试信息，"
-            "或将教务系统地址发给开发者分析。"
+            "可能原因：账号密码错误、该学校部署了非标准青果系统、或课表尚未发布。"
+            "请查看 N.E.K.O 日志面板中 [xiqueer.fetch] 开头的调试信息，"
+            "或将教务系统地址 + 日志截图发给开发者分析。"
         )
 
-    # ---- _parse_course_payload ---------------------------------------------
+    # ── _parse_course_payload ──────────────────────────────────────────────
 
     def _parse_course_payload(self, payload: Any) -> list[dict]:
+        """解析青果 JSON API 返回。支持 kbArr 嵌套结构和扁平结构。"""
         rows: list[dict] = []
 
         def fmt_period(raw) -> str:
-            # 喜鹊儿返回 1-2,3-4 这种区间
             s = str(raw or "").strip()
             m = re.match(r"(\d+)(?:-(\d+))?", s)
-            if not m:
-                return ""
-            return m.group(1)
+            return m.group(1) if m else ""
 
         def fmt_weeks(raw) -> str:
-            """喜鹊儿可能返回 '1-16' 或具体周期数组。"""
-            s = str(raw or "").strip()
-            if not s:
-                return ""
-            return s
-
-        def parse_time_range(raw, fallback_weekday: int) -> tuple[int, str, str]:
-            # 喜鹊儿返回 { jc: "1-2", jc2: "", kbzc: "1-16" }
-            if isinstance(raw, dict):
-                jc = raw.get("jc", "") or raw.get("jszc", "")
-                jc2 = raw.get("jc2", "") or raw.get("jswk", "")
-                wc = raw.get("kbzc", "") or raw.get("jszc2", "")
-                weekday = raw.get("jsjm", raw.get("skxq", fallback_weekday))
-                return int(weekday), fmt_period(jc), fmt_weeks(wc)
-            return fallback_weekday, fmt_period(raw), ""
+            return str(raw or "").strip()
 
         def walk(obj, title_hint=None, fallback_weekday=1):
             if isinstance(obj, list):
@@ -478,50 +538,46 @@ class XiQueErAdapter(AcademicAdapter):
                 teacher = obj.get("zpm", obj.get("jsm", obj.get("teacher", obj.get("zprs", ""))))
                 location = obj.get("cdmc", obj.get("cd", obj.get("location", "")))
 
-                # 喜鹊儿把时间/周期塞在 kbArr 数组里（每格含 jc、kbzc、jsjm 等字段）
                 if "kbArr" in obj and isinstance(obj["kbArr"], list):
                     for cell in obj["kbArr"]:
                         if not isinstance(cell, dict):
                             continue
                         jc = cell.get("jc", "")
-                        jc2 = cell.get("jc2", "") or ""
                         wc = cell.get("kbzc", "")
                         weekday = int(cell.get("jsjm", cell.get("skxq", fallback_weekday)))
-                        periods = fmt_period(jc2) or fmt_period(jc)
+                        periods = fmt_period(jc)
                         if not title or not periods:
                             continue
-                        rows.append({
-                            "title": str(title).strip(),
-                            "teacher": str(teacher).strip() if teacher else "",
-                            "location": str(location).strip() if location else "",
-                            "periods": periods,
-                            "weeks": fmt_weeks(wc),
-                            "weekday": weekday,
-                        })
-
-                # 或者直接在顶层 dict 有 jc / kbzc 字段（扁平结构）
+                        rows.append(
+                            {
+                                "title": str(title).strip(),
+                                "teacher": str(teacher).strip() if teacher else "",
+                                "location": str(location).strip() if location else "",
+                                "periods": periods,
+                                "weeks": fmt_weeks(wc),
+                                "weekday": weekday,
+                            }
+                        )
                 elif "jc" in obj and "kbzc" in obj and title:
-                    jc_val = obj.get("jc", "")
-                    wc_val = obj.get("kbzc", "")
                     weekday = int(obj.get("jsjm", obj.get("skxq", fallback_weekday)))
-                    if jc_val and "kbzc" in obj:
-                        rows.append({
-                            "title": str(title).strip(),
-                            "teacher": str(teacher).strip() if teacher else "",
-                            "location": str(location).strip() if location else "",
-                            "periods": fmt_period(jc_val),
-                            "weeks": fmt_weeks(wc_val),
-                            "weekday": weekday,
-                        })
-                    else:
-                        walk(obj.get("children", obj.get("siblings", [])), title, weekday)
+                    jc_val = obj.get("jc", "")
+                    if jc_val:
+                        rows.append(
+                            {
+                                "title": str(title).strip(),
+                                "teacher": str(teacher).strip() if teacher else "",
+                                "location": str(location).strip() if location else "",
+                                "periods": fmt_period(jc_val),
+                                "weeks": fmt_weeks(obj.get("kbzc", "")),
+                                "weekday": weekday,
+                            }
+                        )
                 else:
                     for v in obj.values():
                         walk(v, title, fallback_weekday)
 
         walk(payload)
 
-        # 去重（同课程+同星期+同节次）
         seen = set()
         unique: list[dict] = []
         for row in rows:
@@ -532,76 +588,89 @@ class XiQueErAdapter(AcademicAdapter):
             unique.append(row)
         return unique
 
-    # ---- _parse_kb_html ----------------------------------------------------
-    """Python 版 Dawn-Course kingosoft.js：解析 HTML 课表页面。"""
+    # ── _parse_kb_html (Dawn-Course kingosoft.js 移植版) ───────────────────
 
     @staticmethod
     def _strip_html_tags(html: str) -> str:
         text = re.sub(r"<[^>]+>", "", html or "")
-        text = text.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        for entity, repl in (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"')):
+            text = text.replace(entity, repl)
         text = re.sub(r"\s+", " ", text).strip()
         return text
 
     @staticmethod
     def _parse_kb_html(html: str) -> list[dict]:
-        """从 KingoSOFT 青果教务系统的 HTML 课表页面提取课程。"""
+        """完整移植 Dawn-Course kingosoft.js scheduleHtmlParser。"""
         if not html or len(html) < 500:
             return []
         clean = html.replace("\r", "").replace("\n", "")
-        courses: list[dict] = []
 
-        # 提取所有 <tr>
+        # 先试列表型课表（很多新版青果用这种）
+        list_courses = XiQueErAdapter._parse_list_table(clean)
+        if list_courses:
+            return list_courses
+
+        # 普通表格课表
         tr_pat = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
         td_pat = re.compile(r"<(td|th)[^>]*>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
 
-        rows = [m.group(1) for m in tr_pat.finditer(clean)]
-        if not rows:
+        rows_html = [m.group(1) for m in tr_pat.finditer(clean)]
+        if not rows_html:
             return []
 
-        # 找表头建立 dayMap（星期几在第几列）
-        day_map: dict[int, int] = {}  # 列索引 → 星期几
+        day_map: dict[int, int] = {}
         header_found = False
-        for row_html in rows:
-            cells = [m.group(2) for m in td_pat.finditer(row_html)]
-            if not cells:
+        for row_html in rows_html:
+            cells_html = [m.group(2) for m in td_pat.finditer(row_html)]
+            if not cells_html:
                 continue
-            for i, c in enumerate(cells):
+            for i, c in enumerate(cells_html):
                 t = XiQueErAdapter._strip_html_tags(c)
-                if "星期一" in t or "周一" in t:
-                    day_map[i] = 1; header_found = True
-                elif "星期二" in t or "周二" in t:
-                    day_map[i] = 2; header_found = True
-                elif "星期三" in t or "周三" in t:
-                    day_map[i] = 3; header_found = True
-                elif "星期四" in t or "周四" in t:
-                    day_map[i] = 4; header_found = True
-                elif "星期五" in t or "周五" in t:
-                    day_map[i] = 5; header_found = True
-                elif "星期六" in t or "周六" in t:
-                    day_map[i] = 6; header_found = True
-                elif ("星期日" in t or "周日" in t or "星期天" in t):
-                    day_map[i] = 7; header_found = True
+                rev_idx = len(cells_html) - 1 - i
+                if any(x in t for x in ("星期一", "周一")):
+                    day_map[rev_idx] = 1
+                    header_found = True
+                elif any(x in t for x in ("星期二", "周二")):
+                    day_map[rev_idx] = 2
+                    header_found = True
+                elif any(x in t for x in ("星期三", "周三")):
+                    day_map[rev_idx] = 3
+                    header_found = True
+                elif any(x in t for x in ("星期四", "周四")):
+                    day_map[rev_idx] = 4
+                    header_found = True
+                elif any(x in t for x in ("星期五", "周五")):
+                    day_map[rev_idx] = 5
+                    header_found = True
+                elif any(x in t for x in ("星期六", "周六")):
+                    day_map[rev_idx] = 6
+                    header_found = True
+                elif any(x in t for x in ("星期日", "周日", "星期天")):
+                    day_map[rev_idx] = 7
+                    header_found = True
             if header_found:
                 break
 
+        courses: list[dict] = []
         if header_found:
-            for row_html in rows:
-                cells = [m.group(2) for m in td_pat.finditer(row_html)]
-                if not cells:
+            for row_html in rows_html:
+                cells_html = [m.group(2) for m in td_pat.finditer(row_html)]
+                if not cells_html:
                     continue
-                max_col = len(cells) - 1
-                for col_idx, day in day_map.items():
-                    cell_html = cells[col_idx] if col_idx < len(cells) else ""
-                    for course in XiQueErAdapter._parse_kb_cell(cell_html, day):
-                        courses.append(course)
+                for col_idx in range(len(cells_html)):
+                    rev_idx = len(cells_html) - 1 - col_idx
+                    day = day_map.get(rev_idx)
+                    if not day:
+                        continue
+                    cell_html = cells_html[col_idx]
+                    courses.extend(XiQueErAdapter._parse_cell(cell_html, day))
         else:
             # 旧版 class="td" 兜底
             td_legacy = re.compile(r'<td[^>]*class=["\']?td["\']?[^>]*>(.*?)</td>', re.IGNORECASE | re.DOTALL)
-            for row_html in rows:
-                cells = [m.group(1) for m in td_legacy.finditer(row_html)]
-                for day, cell_html in enumerate(cells, start=1):
-                    for course in XiQueErAdapter._parse_kb_cell(cell_html, day):
-                        courses.append(course)
+            for row_html in rows_html:
+                cells_html = [m.group(1) for m in td_legacy.finditer(row_html)]
+                for day, cell_html in enumerate(cells_html, start=1):
+                    courses.extend(XiQueErAdapter._parse_cell(cell_html, day))
 
         # 去重
         seen = set()
@@ -615,13 +684,98 @@ class XiQueErAdapter(AcademicAdapter):
         return result
 
     @staticmethod
-    def _parse_kb_cell(cell_html: str, weekday: int) -> list[dict]:
-        """解析单个单元格（可能含多门课，用 <div> 分隔）。"""
+    def _parse_list_table(clean_html: str) -> list[dict]:
+        """列表型课表（新版青果 / 部分正方风格）解析。"""
+        tr_pat = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+        td_pat = re.compile(r"<(td|th)[^>]*>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
+        rows_html = [m.group(1) for m in tr_pat.finditer(clean_html)]
+        if not rows_html:
+            return []
+
+        header_idx = -1
+        header_cells: list[str] = []
+        for i, row_html in enumerate(rows_html):
+            cells = [m.group(2) for m in td_pat.finditer(row_html)]
+            if not cells:
+                continue
+            header_text = XiQueErAdapter._strip_html_tags(" ".join(cells))
+            if "课程" in header_text and (
+                "周次" in header_text or "星期" in header_text or "节次" in header_text or "上课" in header_text
+            ):
+                header_idx = i
+                header_cells = cells
+                break
+        if header_idx < 0 or not header_cells:
+            return []
+
+        index_map = {"name": -1, "teacher": -1, "location": -1, "weeks": -1, "periods": -1, "day": -1}
+        for i, hc in enumerate(header_cells):
+            text = XiQueErAdapter._strip_html_tags(hc)
+            if index_map["name"] < 0 and re.search(r"课程|科目", text):
+                index_map["name"] = i
+            if index_map["teacher"] < 0 and re.search(r"教师|任课|讲师", text):
+                index_map["teacher"] = i
+            if index_map["location"] < 0 and re.search(r"地点|教室|校区|上课地点", text):
+                index_map["location"] = i
+            if index_map["weeks"] < 0 and re.search(r"周次|周数", text):
+                index_map["weeks"] = i
+            if index_map["periods"] < 0 and re.search(r"节次|节数|节", text):
+                index_map["periods"] = i
+            if index_map["day"] < 0 and re.search(r"星期|周几|星期几|上课日", text):
+                index_map["day"] = i
+
+        if index_map["name"] < 0:
+            return []
+
+        courses: list[dict] = []
+        for row_html in rows_html[header_idx + 1 :]:
+            cells = [m.group(2) for m in td_pat.finditer(row_html)]
+            if not cells:
+                continue
+            name_text = XiQueErAdapter._cell_at(cells, index_map["name"])
+            if not name_text:
+                continue
+            teacher = XiQueErAdapter._cell_at(cells, index_map["teacher"])
+            location = XiQueErAdapter._cell_at(cells, index_map["location"])
+            weeks_text = XiQueErAdapter._cell_at(cells, index_map["weeks"])
+            periods_text = XiQueErAdapter._cell_at(cells, index_map["periods"])
+            day_text = XiQueErAdapter._cell_at(cells, index_map["day"])
+
+            row_text = XiQueErAdapter._strip_html_tags(" ".join(cells))
+            if not weeks_text:
+                weeks_text = XiQueErAdapter._extract_weeks_str(row_text)
+            if not periods_text:
+                periods_text = XiQueErAdapter._extract_sections_str(row_text)
+            day = XiQueErAdapter._parse_day_from_text(day_text or row_text)
+
+            if not day or not weeks_text or not periods_text:
+                continue
+            courses.append(
+                {
+                    "title": name_text,
+                    "teacher": teacher,
+                    "location": location,
+                    "weekday": day,
+                    "weeks": weeks_text,
+                    "periods": periods_text,
+                }
+            )
+        return courses
+
+    @staticmethod
+    def _cell_at(cells: list[str], idx: int) -> str:
+        if idx < 0 or idx >= len(cells):
+            return ""
+        return XiQueErAdapter._strip_html_tags(cells[idx])
+
+    @staticmethod
+    def _parse_cell(cell_html: str, weekday: int) -> list[dict]:
+        """解析单个单元格（kingosoft.js parseCell 移植）。"""
         results: list[dict] = []
         if not cell_html or "div_nokb" in cell_html:
             return results
 
-        # 分块（每个 <div> 一个课程块）
+        # 分块：每个 <div> 一个课程块
         div_pat = re.compile(r"<div[^>]*>(.*?)</div>", re.IGNORECASE | re.DOTALL)
         blocks = [m.group(1) for m in div_pat.finditer(cell_html)]
         if not blocks:
@@ -633,36 +787,39 @@ class XiQueErAdapter(AcademicAdapter):
 
             # 课程名：<font> 标签里
             font_match = re.search(r"<font[^>]*>(.*?)</font>", block, re.IGNORECASE | re.DOTALL)
-            if font_match:
-                name = XiQueErAdapter._strip_html_tags(font_match.group(1))
-            else:
-                name = ""
+            name = XiQueErAdapter._strip_html_tags(font_match.group(1)) if font_match else ""
+            if not name:
+                text_parts = re.split(r"<br\s*/?>", block, flags=re.IGNORECASE)
+                for tp in text_parts:
+                    t = XiQueErAdapter._strip_html_tags(tp)
+                    if t and not XiQueErAdapter._looks_like_time(t):
+                        name = t
+                        break
+            if not name:
+                continue
 
-            # 用 <br> 分割剩余部分
+            # 移除课程名，剩余部分
             remaining = re.sub(r"<font[^>]*>.*?</font>", "", block, flags=re.IGNORECASE | re.DOTALL)
-            br_parts = re.split(r"<br\s*/?>", remaining, flags=re.IGNORECASE)
-            br_parts = [XiQueErAdapter._strip_html_tags(p) for p in br_parts]
+            br_parts = [
+                XiQueErAdapter._strip_html_tags(p) for p in re.split(r"<br\s*/?>", remaining, flags=re.IGNORECASE)
+            ]
             br_parts = [p for p in br_parts if p]
 
             teacher = location = weeks_str = sections_str = ""
             for p in br_parts:
-                # 周次+节次：1-16[1-2] 或 1,3,5[1-2] 或 1-16 1-2节
-                time_match = re.search(r"([0-9,\-]+)\s*(?:周|周次)?\s*[\[\(（]\s*([0-9,\-]+)\s*(?:节|节次)?\s*[\]\)）]", p)
-                if time_match:
-                    weeks_str = time_match.group(1)
-                    sections_str = time_match.group(2)
+                m = re.search(r"([0-9,\-]+)\s*(?:周|周次)?\s*[\[\(（]\s*([0-9,\-]+)\s*(?:节|节次)?\s*[\]\)）]", p)
+                if m:
+                    weeks_str = m.group(1)
+                    sections_str = m.group(2)
                     continue
-                # 另一种格式："1-16周 1-2节"
-                time_match2 = re.search(r"([0-9,\-]+)\s*周[，,]?\s*([0-9,\-]+)\s*节", p)
-                if time_match2:
-                    weeks_str = time_match2.group(1)
-                    sections_str = time_match2.group(2)
+                m2 = re.search(r"([0-9,\-]+)\s*周[，,]?\s*([0-9,\-]+)\s*节", p)
+                if m2:
+                    weeks_str = m2.group(1)
+                    sections_str = m2.group(2)
                     continue
-                # 地点识别
                 if not location and re.search(r"(楼|室|馆|区|号|座|园|部|教室)", p):
                     location = p
                     continue
-                # 推测
                 if not weeks_str and not teacher:
                     teacher = p
                 elif weeks_str and not location:
@@ -670,28 +827,75 @@ class XiQueErAdapter(AcademicAdapter):
                 elif not teacher:
                     teacher = p
 
-            if not name:
-                # 没 <font> 就用第一行非空文本
-                text_parts = [XiQueErAdapter._strip_html_tags(b) for b in re.split(r"<br\s*/?>", block, flags=re.IGNORECASE)]
-                for tp in text_parts:
-                    tp = tp.strip()
-                    if tp and not XiQueErAdapter._looks_like_time(tp):
-                        name = tp
-                        break
+            if not weeks_str:
+                weeks_str = XiQueErAdapter._extract_weeks_str(XiQueErAdapter._strip_html_tags(remaining))
+            if not sections_str:
+                sections_str = XiQueErAdapter._extract_sections_str(XiQueErAdapter._strip_html_tags(remaining))
 
             if name and (weeks_str or sections_str):
-                periods = sections_str or ""
-                results.append({
-                    "title": name.strip(),
-                    "teacher": teacher.strip(),
-                    "location": location.strip(),
-                    "weekday": weekday,
-                    "weeks": weeks_str.strip(),
-                    "periods": periods.strip(),
-                })
+                results.append(
+                    {
+                        "title": name.strip(),
+                        "teacher": teacher.strip(),
+                        "location": location.strip(),
+                        "weekday": weekday,
+                        "weeks": weeks_str.strip(),
+                        "periods": sections_str.strip(),
+                    }
+                )
         return results
 
     @staticmethod
     def _looks_like_time(text: str) -> bool:
         return bool(re.match(r"^[\d,\-]+\s*(周|节|日|次)", text))
 
+    @staticmethod
+    def _extract_weeks_str(text: str) -> str:
+        m = re.search(r"([0-9]+(?:-[0-9]+)?)\s*周", text)
+        if m:
+            return m.group(1)
+        # 裸数字区间
+        m2 = re.search(r"\b([0-9]+(?:-[0-9]+)?)\b", text)
+        return m2.group(1) if m2 else ""
+
+    @staticmethod
+    def _extract_sections_str(text: str) -> str:
+        m = re.search(r"([0-9]+(?:-[0-9]+)?)\s*节", text)
+        if m:
+            return m.group(1)
+        m2 = re.search(r"\[([0-9,\-]+)\]", text)
+        return m2.group(1) if m2 else ""
+
+    @staticmethod
+    def _parse_day_from_text(text: str) -> int:
+        if not text:
+            return 0
+        raw = XiQueErAdapter._strip_html_tags(text).replace(" ", "")
+        mapping = [
+            ("星期一", 1),
+            ("周二", 2),
+            ("星期三", 3),
+            ("周四", 4),
+            ("星期五", 5),
+            ("周六", 6),
+            ("星期日", 7),
+            ("星期天", 7),
+        ]
+        for keyword, num in mapping:
+            if keyword in raw:
+                return num
+        cn_map = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7}
+        m = re.search(r"[星期周]\s*([一二三四五六日天])", raw)
+        if m and m.group(1) in cn_map:
+            return cn_map[m.group(1)]
+        m2 = re.search(r"[星期周]?\s*([1-7])", raw)
+        if m2:
+            return int(m2.group(1))
+        if re.match(r"^[1-7]$", raw):
+            return int(raw)
+        return 0
+
+
+def _l(msg: str) -> None:
+    """调试日志：print 到 stdout，N.E.K.O 会捕获。"""
+    print(msg, flush=True)

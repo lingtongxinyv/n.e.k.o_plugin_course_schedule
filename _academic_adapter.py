@@ -11,6 +11,7 @@ normalized dict（见 routers/import_export.py 顶部注释），然后复用同
 
 adapter 只做数据获取和转换，不写数据库。
 """
+
 from __future__ import annotations
 
 import asyncio

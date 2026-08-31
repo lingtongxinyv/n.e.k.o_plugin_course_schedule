@@ -1,4 +1,5 @@
 """课程表数据访问层。"""
+
 from __future__ import annotations
 
 from plugin.sdk.plugin import unwrap
@@ -31,9 +32,7 @@ class ScheduleRepo:
 
     async def get_active_semester(self) -> dict | None:
         async with await self._session() as session:
-            cur = await session.execute(
-                "SELECT * FROM semesters WHERE is_active = 1 ORDER BY id DESC LIMIT 1"
-            )
+            cur = await session.execute("SELECT * FROM semesters WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
             row = cur.fetchone()
         return dict(row) if row else None
 
@@ -42,8 +41,7 @@ class ScheduleRepo:
             if activate:
                 await session.execute("UPDATE semesters SET is_active = 0")
             cur = await session.execute(
-                "INSERT INTO semesters (name, start_date, end_date, total_weeks, is_active) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO semesters (name, start_date, end_date, total_weeks, is_active) VALUES (?, ?, ?, ?, ?)",
                 (name, str(start_date), str(end_date), int(total_weeks), 1 if activate else 0),
             )
             sid = cur.lastrowid
@@ -55,8 +53,12 @@ class ScheduleRepo:
                 )
             await session.commit()
         return {
-            "id": sid, "name": name, "start_date": str(start_date),
-            "end_date": str(end_date), "total_weeks": int(total_weeks), "is_active": activate,
+            "id": sid,
+            "name": name,
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+            "total_weeks": int(total_weeks),
+            "is_active": activate,
         }
 
     async def activate_semester(self, semester_id: int) -> bool:
@@ -79,8 +81,7 @@ class ScheduleRepo:
             )
             rows = cur.fetchall()
         return {
-            r["period_no"]: {"start_time": r["start_time"], "end_time": r["end_time"], "slot": r["slot"]}
-            for r in rows
+            r["period_no"]: {"start_time": r["start_time"], "end_time": r["end_time"], "slot": r["slot"]} for r in rows
         }
 
     async def set_period_times(self, semester_id: int, periods: list[dict]) -> int:
@@ -91,15 +92,20 @@ class ScheduleRepo:
                     "INSERT INTO period_times (semester_id, period_no, start_time, end_time, slot) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (
-                        int(semester_id), int(p["period_no"]), str(p["start_time"]),
-                        str(p["end_time"]), p.get("slot") or "morning",
+                        int(semester_id),
+                        int(p["period_no"]),
+                        str(p["start_time"]),
+                        str(p["end_time"]),
+                        p.get("slot") or "morning",
                     ),
                 )
             await session.commit()
         return len(periods)
 
     # ── 课程 ──
-    async def add_course(self, *, semester_id, name, code=None, teacher=None, location=None, color=None, note=None) -> dict:
+    async def add_course(
+        self, *, semester_id, name, code=None, teacher=None, location=None, color=None, note=None
+    ) -> dict:
         async with await self._session() as session:
             cur = await session.execute(
                 "INSERT INTO courses (semester_id, name, code, teacher, location, color, note) "
@@ -108,14 +114,20 @@ class ScheduleRepo:
             )
             cid = cur.lastrowid
             await session.commit()
-        return {"id": cid, "semester_id": int(semester_id), "name": name, "code": code,
-                "teacher": teacher, "location": location, "color": color, "note": note}
+        return {
+            "id": cid,
+            "semester_id": int(semester_id),
+            "name": name,
+            "code": code,
+            "teacher": teacher,
+            "location": location,
+            "color": color,
+            "note": note,
+        }
 
     async def list_courses(self, semester_id: int) -> list[dict]:
         async with await self._session() as session:
-            cur = await session.execute(
-                "SELECT * FROM courses WHERE semester_id = ? ORDER BY id", (int(semester_id),)
-            )
+            cur = await session.execute("SELECT * FROM courses WHERE semester_id = ? ORDER BY id", (int(semester_id),))
             rows = cur.fetchall()
         return [dict(r) for r in rows]
 
@@ -130,17 +142,24 @@ class ScheduleRepo:
         wj = weeks_to_json(weeks)
         async with await self._session() as session:
             cur = await session.execute(
-                "INSERT INTO course_sessions (course_id, weekday, period_no, weeks, note) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO course_sessions (course_id, weekday, period_no, weeks, note) VALUES (?, ?, ?, ?, ?)",
                 (int(course_id), int(weekday), int(period_no), wj, note),
             )
             sid = cur.lastrowid
             await session.commit()
-        return {"id": sid, "course_id": int(course_id), "weekday": int(weekday),
-                "period_no": int(period_no), "weeks": parse_weeks(wj), "note": note}
+        return {
+            "id": sid,
+            "course_id": int(course_id),
+            "weekday": int(weekday),
+            "period_no": int(period_no),
+            "weeks": parse_weeks(wj),
+            "note": note,
+        }
 
     # ── 例外 ──
-    async def add_exception(self, *, semester_id, course_id=None, title=None, date, kind, period_no=None, location=None, note=None) -> dict:
+    async def add_exception(
+        self, *, semester_id, course_id=None, title=None, date, kind, period_no=None, location=None, note=None
+    ) -> dict:
         async with await self._session() as session:
             cur = await session.execute(
                 "INSERT INTO exceptions (semester_id, course_id, title, date, kind, period_no, location, note) "
@@ -149,8 +168,17 @@ class ScheduleRepo:
             )
             eid = cur.lastrowid
             await session.commit()
-        return {"id": eid, "semester_id": int(semester_id), "course_id": course_id, "title": title,
-                "date": str(date), "kind": kind, "period_no": period_no, "location": location, "note": note}
+        return {
+            "id": eid,
+            "semester_id": int(semester_id),
+            "course_id": course_id,
+            "title": title,
+            "date": str(date),
+            "kind": kind,
+            "period_no": period_no,
+            "location": location,
+            "note": note,
+        }
 
     async def list_exceptions(self, semester_id: int, date_str: str | None = None) -> list[dict]:
         async with await self._session() as session:
@@ -213,17 +241,25 @@ class ScheduleRepo:
                     loc = loc or course.get("location")
                     teacher = course.get("teacher")
                     color = course.get("color")
-            sessions.append({
-                "course_id": e.get("course_id"), "period_no": e["period_no"],
-                "name": name or "临时安排", "location": loc, "teacher": teacher,
-                "color": color, "note": e.get("note"), "exception_id": e["id"],
-            })
+            sessions.append(
+                {
+                    "course_id": e.get("course_id"),
+                    "period_no": e["period_no"],
+                    "name": name or "临时安排",
+                    "location": loc,
+                    "teacher": teacher,
+                    "color": color,
+                    "note": e.get("note"),
+                    "exception_id": e["id"],
+                }
+            )
         sessions.sort(key=lambda x: x.get("period_no") or 0)
         return sessions
 
     # ── 作业 / 考试 ──
-    async def add_assignment(self, *, semester_id, kind, title, course_id=None,
-                             due_at=None, location=None, note=None) -> dict:
+    async def add_assignment(
+        self, *, semester_id, kind, title, course_id=None, due_at=None, location=None, note=None
+    ) -> dict:
         async with await self._session() as session:
             cur = await session.execute(
                 "INSERT INTO assignments (semester_id, course_id, kind, title, due_at, location, note) "
@@ -232,15 +268,24 @@ class ScheduleRepo:
             )
             aid = cur.lastrowid
             await session.commit()
-        return {"id": aid, "semester_id": int(semester_id), "course_id": course_id,
-                "kind": kind, "title": title, "due_at": due_at,
-                "location": location, "note": note, "done": 0}
+        return {
+            "id": aid,
+            "semester_id": int(semester_id),
+            "course_id": course_id,
+            "kind": kind,
+            "title": title,
+            "due_at": due_at,
+            "location": location,
+            "note": note,
+            "done": 0,
+        }
 
-    async def list_assignments(self, *, semester_id, kind=None, status=None,
-                               course_id=None, limit=100) -> list[dict]:
-        sql = ("SELECT a.*, c.name AS course_name "
-               "FROM assignments a LEFT JOIN courses c ON c.id = a.course_id "
-               "WHERE a.semester_id = ?")
+    async def list_assignments(self, *, semester_id, kind=None, status=None, course_id=None, limit=100) -> list[dict]:
+        sql = (
+            "SELECT a.*, c.name AS course_name "
+            "FROM assignments a LEFT JOIN courses c ON c.id = a.course_id "
+            "WHERE a.semester_id = ?"
+        )
         params: list = [int(semester_id)]
         if kind:
             sql += " AND a.kind = ?"
@@ -268,13 +313,15 @@ class ScheduleRepo:
         vals.append(int(assignment_id))
         async with await self._session() as session:
             await session.execute(
-                f"UPDATE assignments SET {', '.join(sets)} WHERE id = ?", vals,
+                f"UPDATE assignments SET {', '.join(sets)} WHERE id = ?",
+                vals,
             )
             await session.commit()
             cur = await session.execute(
                 "SELECT a.*, c.name AS course_name "
                 "FROM assignments a LEFT JOIN courses c ON c.id = a.course_id "
-                "WHERE a.id = ?", (int(assignment_id),),
+                "WHERE a.id = ?",
+                (int(assignment_id),),
             )
             row = cur.fetchone()
         return dict(row) if row else None
@@ -282,16 +329,19 @@ class ScheduleRepo:
     async def delete_assignment(self, assignment_id: int) -> bool:
         async with await self._session() as session:
             cur = await session.execute(
-                "DELETE FROM assignments WHERE id = ?", (int(assignment_id),),
+                "DELETE FROM assignments WHERE id = ?",
+                (int(assignment_id),),
             )
             await session.commit()
         return cur.rowcount > 0
 
     async def get_upcoming_assignments(self, *, semester_id, kind=None, limit=10) -> list[dict]:
-        sql = ("SELECT a.*, c.name AS course_name "
-               "FROM assignments a LEFT JOIN courses c ON c.id = a.course_id "
-               "WHERE a.semester_id = ? AND a.done = 0 AND a.due_at IS NOT NULL "
-               "AND a.due_at >= date('now')")
+        sql = (
+            "SELECT a.*, c.name AS course_name "
+            "FROM assignments a LEFT JOIN courses c ON c.id = a.course_id "
+            "WHERE a.semester_id = ? AND a.done = 0 AND a.due_at IS NOT NULL "
+            "AND a.due_at >= date('now')"
+        )
         params: list = [int(semester_id)]
         if kind:
             sql += " AND a.kind = ?"

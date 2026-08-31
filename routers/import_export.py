@@ -8,6 +8,7 @@
 
 所有导入都会先"预览/校验"再入库，返回 created / skipped 统计。
 """
+
 from __future__ import annotations
 
 import csv
@@ -83,10 +84,17 @@ def parse_csv(content: str) -> dict:
         code = (row.get("code") or row.get("课程代码") or "").strip() or None
         note = (row.get("note") or row.get("备注") or "").strip() or None
 
-        course = courses_map.setdefault(name, {
-            "name": name, "code": code, "teacher": teacher,
-            "location": location, "note": note, "sessions": [],
-        })
+        course = courses_map.setdefault(
+            name,
+            {
+                "name": name,
+                "code": code,
+                "teacher": teacher,
+                "location": location,
+                "note": note,
+                "sessions": [],
+            },
+        )
         if wd and pno:
             course["sessions"].append({"weekday": wd, "period_no": pno, "weeks": weeks})
 
@@ -117,9 +125,17 @@ def parse_ics(content: str) -> dict:
 
     # 中国高校默认作息（与 _schema.DEFAULT_PERIOD_TIMES 同步）
     _PERIOD_STARTS = [
-        "08:00", "08:55", "10:00", "10:55",
-        "14:00", "14:55", "16:00", "16:55",
-        "19:00", "19:55", "20:50",
+        "08:00",
+        "08:55",
+        "10:00",
+        "10:55",
+        "14:00",
+        "14:55",
+        "16:00",
+        "16:55",
+        "19:00",
+        "19:55",
+        "20:50",
     ]
 
     def _time_to_period(dt_str: str) -> int | None:
@@ -157,9 +173,15 @@ def parse_ics(content: str) -> dict:
 
         if not summary:
             continue
-        course = courses_map.setdefault(summary, {
-            "name": summary, "location": loc, "note": desc or None, "sessions": [],
-        })
+        course = courses_map.setdefault(
+            summary,
+            {
+                "name": summary,
+                "location": loc,
+                "note": desc or None,
+                "sessions": [],
+            },
+        )
         if weekday and period_no:
             # 同 (weekday, period) 去重
             already = {(s["weekday"], s["period_no"]) for s in course["sessions"]}
@@ -195,6 +217,7 @@ def _parse_weeks_field(s: str) -> list[int] | None:
 # ──────────────────────────────────────────────────────────────
 # 入库逻辑
 # ──────────────────────────────────────────────────────────────
+
 
 async def _apply_normalized(router: PluginRouter, data: dict, semester_id: int) -> dict:
     """把 normalized dict 写入数据库，返回统计。"""
@@ -299,6 +322,7 @@ async def _apply_normalized(router: PluginRouter, data: dict, semester_id: int) 
 # 导出
 # ──────────────────────────────────────────────────────────────
 
+
 async def _build_normalized_for_export(router: PluginRouter, semester_id: int) -> dict:
     repo = router.main_plugin.repo
 
@@ -310,9 +334,7 @@ async def _build_normalized_for_export(router: PluginRouter, semester_id: int) -
         if not sem_row:
             raise ValueError(f"semester_id={semester_id} 不存在")
         sem = dict(sem_row)
-        cur = await session.execute(
-            "SELECT * FROM courses WHERE semester_id = ? ORDER BY id", (int(semester_id),)
-        )
+        cur = await session.execute("SELECT * FROM courses WHERE semester_id = ? ORDER BY id", (int(semester_id),))
         courses_rows = [dict(r) for r in cur.fetchall()]
         cur = await session.execute(
             "SELECT cs.* FROM course_sessions cs JOIN courses c ON c.id = cs.course_id "
@@ -320,42 +342,55 @@ async def _build_normalized_for_export(router: PluginRouter, semester_id: int) -
             (int(semester_id),),
         )
         sessions_rows = [dict(r) for r in cur.fetchall()]
-        cur = await session.execute(
-            "SELECT * FROM exceptions WHERE semester_id = ? ORDER BY date", (int(semester_id),)
-        )
+        cur = await session.execute("SELECT * FROM exceptions WHERE semester_id = ? ORDER BY date", (int(semester_id),))
         exceptions_rows = [dict(r) for r in cur.fetchall()]
 
     sessions_by_course: dict[int, list[dict]] = {}
     for s in sessions_rows:
-        sessions_by_course.setdefault(s["course_id"], []).append({
-            "weekday": int(s["weekday"]),
-            "period_no": int(s["period_no"]),
-            "weeks": json.loads(s["weeks"]) if s["weeks"] else None,
-            "note": s["note"],
-        })
+        sessions_by_course.setdefault(s["course_id"], []).append(
+            {
+                "weekday": int(s["weekday"]),
+                "period_no": int(s["period_no"]),
+                "weeks": json.loads(s["weeks"]) if s["weeks"] else None,
+                "note": s["note"],
+            }
+        )
 
     courses_out = []
     for c in courses_rows:
-        courses_out.append({
-            "name": c["name"], "code": c["code"], "teacher": c["teacher"],
-            "location": c["location"], "color": c["color"], "note": c["note"],
-            "sessions": sessions_by_course.get(c["id"], []),
-        })
+        courses_out.append(
+            {
+                "name": c["name"],
+                "code": c["code"],
+                "teacher": c["teacher"],
+                "location": c["location"],
+                "color": c["color"],
+                "note": c["note"],
+                "sessions": sessions_by_course.get(c["id"], []),
+            }
+        )
 
     exceptions_out = []
     course_name_by_id = {c["id"]: c["name"] for c in courses_rows}
     for e in exceptions_rows:
-        exceptions_out.append({
-            "date": e["date"], "kind": e["kind"],
-            "course_match": {"name": course_name_by_id.get(e["course_id"])} if e["course_id"] else None,
-            "title": e["title"], "period_no": e["period_no"],
-            "location": e["location"], "note": e["note"],
-        })
+        exceptions_out.append(
+            {
+                "date": e["date"],
+                "kind": e["kind"],
+                "course_match": {"name": course_name_by_id.get(e["course_id"])} if e["course_id"] else None,
+                "title": e["title"],
+                "period_no": e["period_no"],
+                "location": e["location"],
+                "note": e["note"],
+            }
+        )
 
     return {
         "semester": {
-            "id": sem["id"], "name": sem["name"],
-            "start_date": sem["start_date"], "end_date": sem["end_date"],
+            "id": sem["id"],
+            "name": sem["name"],
+            "start_date": sem["start_date"],
+            "end_date": sem["end_date"],
             "total_weeks": sem["total_weeks"],
         },
         "courses": courses_out,
@@ -366,6 +401,7 @@ async def _build_normalized_for_export(router: PluginRouter, semester_id: int) -
 # ──────────────────────────────────────────────────────────────
 # Router
 # ──────────────────────────────────────────────────────────────
+
 
 class ImportExportRouter(PluginRouter):
     def __init__(self):
@@ -449,9 +485,7 @@ class ImportExportRouter(PluginRouter):
     @plugin_entry(
         id="export_schedule",
         name="导出课表",
-        description=(
-            "把指定（或当前）学期的课表导出为文本。format=json（默认）|csv|ics。"
-        ),
+        description=("把指定（或当前）学期的课表导出为文本。format=json（默认）|csv|ics。"),
         input_schema={
             "type": "object",
             "properties": {
@@ -481,17 +515,29 @@ class ImportExportRouter(PluginRouter):
             for c in norm["courses"]:
                 for s in c["sessions"]:
                     weeks = ",".join(str(w) for w in s["weeks"]) if s.get("weeks") else ""
-                    w.writerow([s["weekday"], s["period_no"], c["name"],
-                               c.get("teacher") or "", c.get("location") or "", weeks])
+                    w.writerow(
+                        [
+                            s["weekday"],
+                            s["period_no"],
+                            c["name"],
+                            c.get("teacher") or "",
+                            c.get("location") or "",
+                            weeks,
+                        ]
+                    )
             text = buf.getvalue()
         elif fmt == "ics":
             text = _build_ics(norm)
         else:
             return Err(SdkError(f"不支持的 format: {format}"))
-        return Ok({
-            "format": fmt, "semester_id": sid,
-            "content": text, "size": len(text),
-        })
+        return Ok(
+            {
+                "format": fmt,
+                "semester_id": sid,
+                "content": text,
+                "size": len(text),
+            }
+        )
 
 
 def _build_ics(norm: dict) -> str:
@@ -499,14 +545,30 @@ def _build_ics(norm: dict) -> str:
     lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//N.E.K.O CourseSchedule//EN"]
     # 默认作息起止
     start_map = {
-        1: "080000", 2: "085500", 3: "100000", 4: "105500",
-        5: "140000", 6: "145500", 7: "160000", 8: "165500",
-        9: "190000", 10: "195500", 11: "205000",
+        1: "080000",
+        2: "085500",
+        3: "100000",
+        4: "105500",
+        5: "140000",
+        6: "145500",
+        7: "160000",
+        8: "165500",
+        9: "190000",
+        10: "195500",
+        11: "205000",
     }
     end_map = {
-        1: "084500", 2: "094000", 3: "104500", 4: "114000",
-        5: "144500", 6: "154000", 7: "164500", 8: "174000",
-        9: "194500", 10: "204000", 11: "213500",
+        1: "084500",
+        2: "094000",
+        3: "104500",
+        4: "114000",
+        5: "144500",
+        6: "154000",
+        7: "164500",
+        8: "174000",
+        9: "194500",
+        10: "204000",
+        11: "213500",
     }
     week_day_abbr = {1: "MO", 2: "TU", 3: "WE", 4: "TH", 5: "FR", 6: "SA", 7: "SU"}
 

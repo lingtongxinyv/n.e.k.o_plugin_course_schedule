@@ -1,4 +1,5 @@
 """课程管理入口：学期、课程、上课安排、节次、例外。"""
+
 from __future__ import annotations
 
 from plugin.sdk.plugin import Err, Ok, SdkError, plugin_entry
@@ -34,7 +35,9 @@ class ManageRouter(PluginRouter):
             "required": ["name", "start_date", "end_date"],
         },
     )
-    async def add_semester(self, name: str, start_date: str, end_date: str, total_weeks: int = 0, activate: bool = True, **_):
+    async def add_semester(
+        self, name: str, start_date: str, end_date: str, total_weeks: int = 0, activate: bool = True, **_
+    ):
         s = parse_date(start_date)
         e = parse_date(end_date)
         if not s or not e:
@@ -43,7 +46,9 @@ class ManageRouter(PluginRouter):
             return Err(SdkError("end_date 早于 start_date"))
         if not total_weeks:
             total_weeks = (e - s).days // 7 + 1
-        rec = await self.repo.add_semester(name=name, start_date=s, end_date=e, total_weeks=total_weeks, activate=activate)
+        rec = await self.repo.add_semester(
+            name=name, start_date=s, end_date=e, total_weeks=total_weeks, activate=activate
+        )
         self.logger.info("学期已创建: {} ({})", name, rec["id"])
         return Ok({"semester": rec, "active": activate})
 
@@ -94,7 +99,11 @@ class ManageRouter(PluginRouter):
                         "properties": {
                             "weekday": {"type": "integer", "description": "周几 1-7（1=周一）"},
                             "period_no": {"type": "integer", "description": "第几节"},
-                            "weeks": {"type": "array", "items": {"type": "integer"}, "description": "周次列表，空=每周"},
+                            "weeks": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                                "description": "周次列表，空=每周",
+                            },
                         },
                     },
                 },
@@ -102,7 +111,18 @@ class ManageRouter(PluginRouter):
             "required": ["name"],
         },
     )
-    async def add_course(self, name: str, code: str = "", teacher: str = "", location: str = "", color: str = "", note: str = "", semester_id: int = 0, sessions: list | None = None, **_):
+    async def add_course(
+        self,
+        name: str,
+        code: str = "",
+        teacher: str = "",
+        location: str = "",
+        color: str = "",
+        note: str = "",
+        semester_id: int = 0,
+        sessions: list | None = None,
+        **_,
+    ):
         if semester_id:
             sem = {"id": int(semester_id)}
         else:
@@ -110,11 +130,16 @@ class ManageRouter(PluginRouter):
         if not sem:
             return Err(SdkError("没有当前学期，请先 add_semester"))
         course = await self.repo.add_course(
-            semester_id=sem["id"], name=name, code=code or None, teacher=teacher or None,
-            location=location or None, color=color or None, note=note or None,
+            semester_id=sem["id"],
+            name=name,
+            code=code or None,
+            teacher=teacher or None,
+            location=location or None,
+            color=color or None,
+            note=note or None,
         )
         created = []
-        for s in (sessions or []):
+        for s in sessions or []:
             try:
                 wd = int(s.get("weekday", 0))
                 pno = int(s.get("period_no", 0))
@@ -122,7 +147,9 @@ class ManageRouter(PluginRouter):
                 return Err(SdkError(f"sessions 中 weekday/period_no 必须为整数: {s}"))
             if not (1 <= wd <= 7) or pno < 1:
                 return Err(SdkError(f"weekday 需 1-7、period_no 需 ≥1: {s}"))
-            created.append(await self.repo.add_session(course_id=course["id"], weekday=wd, period_no=pno, weeks=s.get("weeks")))
+            created.append(
+                await self.repo.add_session(course_id=course["id"], weekday=wd, period_no=pno, weeks=s.get("weeks"))
+            )
         return Ok({"course": course, "sessions": created})
 
     @plugin_entry(
@@ -143,7 +170,9 @@ class ManageRouter(PluginRouter):
     async def add_session_entry(self, course_id: int, weekday: int, period_no: int, weeks: list | None = None, **_):
         if not (1 <= int(weekday) <= 7) or int(period_no) < 1:
             return Err(SdkError("weekday 需 1-7、period_no 需 ≥1"))
-        rec = await self.repo.add_session(course_id=int(course_id), weekday=int(weekday), period_no=int(period_no), weeks=weeks)
+        rec = await self.repo.add_session(
+            course_id=int(course_id), weekday=int(weekday), period_no=int(period_no), weeks=weeks
+        )
         return Ok({"session": rec})
 
     @plugin_entry(
@@ -167,7 +196,17 @@ class ManageRouter(PluginRouter):
             "required": ["date", "kind"],
         },
     )
-    async def add_exception(self, date: str, kind: str, course_id: int = 0, title: str = "", period_no: int = 0, location: str = "", note: str = "", **_):
+    async def add_exception(
+        self,
+        date: str,
+        kind: str,
+        course_id: int = 0,
+        title: str = "",
+        period_no: int = 0,
+        location: str = "",
+        note: str = "",
+        **_,
+    ):
         d = parse_date(date)
         if not d:
             return Err(SdkError("date 需为 YYYY-MM-DD"))
@@ -179,8 +218,14 @@ class ManageRouter(PluginRouter):
         if not sem:
             return Err(SdkError("没有当前学期"))
         rec = await self.repo.add_exception(
-            semester_id=sem["id"], course_id=int(course_id) or None, title=title or None,
-            date=d, kind=kind, period_no=int(period_no) or None, location=location or None, note=note or None,
+            semester_id=sem["id"],
+            course_id=int(course_id) or None,
+            title=title or None,
+            date=d,
+            kind=kind,
+            period_no=int(period_no) or None,
+            location=location or None,
+            note=note or None,
         )
         return Ok({"exception": rec})
 
