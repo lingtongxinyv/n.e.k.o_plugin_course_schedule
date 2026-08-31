@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from .._academic_adapter import AcademicAdapter, AcademicAdapterError
+from .xiqueer import XiQueErAdapter
 
 _REGISTRY: dict[str, type[AcademicAdapter]] = {}
 
@@ -34,7 +35,5 @@ def get_adapter(adapter_id: str, **kwargs) -> AcademicAdapter:
 
 
 # ── 注册内置适配器 ──
-
-from .xiqueer import XiQueErAdapter  # noqa: E402
 
 _REGISTRY["xiqueer"] = XiQueErAdapter
