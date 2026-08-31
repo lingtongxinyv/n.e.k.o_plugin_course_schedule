@@ -21,9 +21,6 @@ locales_dir = "i18n"
 [plugin.store]
 enabled = true
 
-[plugin.database]
-enabled = true
-
 [plugin.ui]
 enabled = true
 
