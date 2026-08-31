@@ -143,11 +143,15 @@ class XiQueErAdapter(AcademicAdapter):
     adapter_name = "喜鹊儿（青果教务）"
     website = "https://jw.hwec.edu.cn"
 
-    def __init__(self):
-        self.base_url: str = ""
+    def __init__(self, **kwargs):
+        # get_adapter("xiqueer", base_url=..., school_code=...) 会把参数透传给 __init__
+        self.base_url: str = (kwargs.get("base_url") or "").rstrip("/")
         self._session: _HttpSession | None = None
         self._username: str = ""
         self._semester_keyword: str = ""
+        # base_url 先归一化（去掉可能的 /cas/login.action 后缀）
+        if self.base_url:
+            self.base_url = _normalize_base_url(self.base_url)
 
     # ---- authenticate ------------------------------------------------------
 
