@@ -1,4 +1,4 @@
-﻿import {
+import {
   Page,
   Card,
   Grid,
@@ -554,8 +554,8 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
           </Stack>
         </Accordion>
 
-        {/* ========== Grid 2列：学期管理 + 一键教务导入 ========== */}
-        <Grid cols={2}>
+        {/* ========== Stack 单列：学期管理 + 一键教务导入 ========== */}
+        <Stack gap="md">
 
           {/* 学期管理 */}
           <Card title="学期管理">
@@ -705,10 +705,10 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
             </Stack>
           </Card>
 
-        </Grid>
+        </Stack>
 
-        {/* ========== Grid 2列：手动添加课程 + 表格粘贴导入 ========== */}
-        <Grid cols={2}>
+        {/* ========== Stack 单列：手动添加课程 + 表格粘贴导入 ========== */}
+        <Stack gap="md">
 
           {/* 添加课程 */}
           {activeSem ? (
@@ -784,7 +784,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
             </Stack>
           </Card>
 
-        </Grid>
+        </Stack>
 
         {/* ========== 课程列表 ========== */}
         {courses.length > 0 ? (
@@ -802,8 +802,8 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
           </Card>
         ) : null}
 
-        {/* ========== Grid 2列：作业管理 + 考试管理 ========== */}
-        <Grid cols={2}>
+        {/* ========== Stack 单列：作业管理 + 考试管理 ========== */}
+        <Stack gap="md">
 
           {/* 作业管理 */}
           {activeSem ? (
@@ -929,7 +929,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
             </Card>
           ) : null}
 
-        </Grid>
+        </Stack>
       </Stack>
     </Page>
   )

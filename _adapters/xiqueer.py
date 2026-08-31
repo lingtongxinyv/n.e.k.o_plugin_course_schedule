@@ -62,93 +62,139 @@ class XiQueErAdapter(AcademicAdapter):
         import asyncio as _asyncio
 
         def _do_login():
-            s = _requests.Session()
-            s.headers.update({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            })
-
-            # 1) 登录页面
-            login_page_url = f"{self.base_url}/cas/login.action"
-            r = s.get(login_page_url, timeout=10)
-            if r.status_code != 200:
-                raise AcademicAdapterError(f"无法访问教务系统登录页：HTTP {r.status_code}（{login_page_url}）")
-            jsessionid = s.cookies.get("JSESSIONID")
-            if not jsessionid:
-                raise AcademicAdapterError(
-                    "登录页未返回 JSESSIONID。"
-                    f" 登录页内容前200字：{r.text[:200]}"
-                )
-
-            # 尝试多种正则匹配 _sessionid（不同学校登录页格式略有差异）
-            session_id = None
-            session_id_patterns = [
-                r'var\s+_sessionid\s*=\s*"([A-Fa-f0-9]+)"',       # 标准大写 hex
-                r"var\s+_sessionid\s*=\s*'([A-Fa-f0-9]+)'",       # 单引号版本
-                r"var\s+sessionid\s*=\s*['\"]([A-Fa-f0-9]+)['\"]",  # 变量名无下划线
-                r'_sessionid["\']?\s*[:=]\s*["\']([A-Fa-f0-9]+)["\']',  # JSON/对象属性风格
-            ]
-            for pat in session_id_patterns:
-                m = re.search(pat, r.text)
-                if m:
-                    session_id = m.group(1)
-                    break
-
-            if not session_id:
-                raise AcademicAdapterError(
-                    "无法从登录页提取 _sessionid（学校教务系统登录页格式可能不同）。"
-                    f" 登录页前300字：{r.text[:300]}"
-                )
-
-            # 2) 动态参数
-            deskey = s.get(f"{self.base_url}/frame/homepage?method=getTempDeskey", timeout=10).text.strip()
-            nowtime = s.get(f"{self.base_url}/frame/homepage?method=getTempNowtime", timeout=10).text.strip()
-            if not deskey or not nowtime:
-                raise AcademicAdapterError(
-                    "获取 deskey/nowtime 失败，教务系统可能不可用或需要额外参数。"
-                    f" deskey={deskey[:50] if deskey else '(空)'}, nowtime={nowtime[:50] if nowtime else '(空)'}"
-                )
-
-            # 3) 组装登录参数
-            params_u = base64.b64encode(f"{username};;{session_id}".encode()).decode()
-            real_pwd = md5_password or hashlib.md5(password.encode("utf-8")).hexdigest()
-            params_p = hashlib.md5((real_pwd + hashlib.md5(b"").hexdigest()).encode("utf-8")).hexdigest()
-
-            params_v1 = (
-                f"_u={params_u}&_p={params_p}&randnumber=&isPasswordPolicy=1&"
-                "txt_mm_expression=14&txt_mm_length=15&txt_mm_userzh=0&"
-                "hid_flag=1&hidlag=1&hid_dxyzm="
-            )
-            token = hashlib.md5(
-                (hashlib.md5(params_v1.encode()).hexdigest() + hashlib.md5(nowtime.encode()).hexdigest()).encode()
-            ).hexdigest()
-            params_v1_encoded = KingoDES.encrypt(params_v1, deskey)
-
-            post_body = f"params={params_v1_encoded}&token={token}&timestamp={nowtime}&deskey={deskey}&ssessionid={session_id}"
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": f"{self.base_url}/cas/login.action",
-                "Cookie": f"JSESSIONID={jsessionid}",
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "X-Requested-With": "XMLHttpRequest",
-            }
-            r = s.post(f"{self.base_url}/cas/logon.action", data=post_body, headers=headers, timeout=10)
+            # ⚠️ 关键：requests 默认会读取 HTTP_PROXY/HTTPS_PROXY 环境变量。
+            # 学校内网代理可能会拦截 HTTPS 请求并返回虚假 HTML（如"凭证已失效"），
+            # 必须禁用代理 + 关闭 SSL 校验，让请求直连目标服务器。
+            import os as _os
+            _os.environ.pop("HTTP_PROXY", None)
+            _os.environ.pop("HTTPS_PROXY", None)
+            _os.environ.pop("http_proxy", None)
+            _os.environ.pop("https_proxy", None)
             try:
-                result = r.json()
+                import urllib3 as _urllib3
+                _urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)
             except Exception:
-                # 服务器返回了 HTML 而非 JSON —— 通常意味着 session/token 失效
-                body_snippet = r.text[:500].replace("\n", " ").replace("\r", " ")
-                raise AcademicAdapterError(
-                    f"登录返回非 JSON（服务器返回了 HTML/脚本）。"
-                    f" 登录凭证 session/deskey 可能已失效或与该教务系统版本不兼容。"
-                    f" 服务器响应前500字：{body_snippet}"
-                )
-            if str(result.get("status")) != "200":
-                raise AcademicAdapterError(
-                    f"登录失败：{result.get('message', '未知错误')} "
-                    f"(code={result.get('status')})"
-                )
+                pass
 
-            return s, username
+            for attempt in range(3):  # 最多重试 3 次（偶尔服务器返回错误 HTML）
+                s = _requests.Session()
+                s.trust_env = False    # 不信任环境变量里的代理设置
+                s.verify = False       # 国内学校 HTTPS 证书常常不受信任
+                s.headers.update({
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                })
+
+                # 1) 登录页面
+                login_page_url = f"{self.base_url}/cas/login.action"
+                r = s.get(login_page_url, timeout=30)
+                if r.status_code != 200:
+                    if attempt < 2:
+                        continue
+                    raise AcademicAdapterError(f"无法访问教务系统登录页：HTTP {r.status_code}（{login_page_url}）")
+
+                # 检查是不是真的登录页（有时代理返回错误 HTML）
+                if "凭证已失效" in r.text or re.search(r'<script>alert\(', r.text[:2000]):
+                    if attempt < 2:
+                        continue  # 重试
+                    raise AcademicAdapterError(
+                        "登录页被代理/网关拦截，返回了错误页面。"
+                        " 请检查是否在校园网环境或关闭系统代理后重试。"
+                        f" 前300字：{r.text[:300]}"
+                    )
+
+                jsessionid = s.cookies.get("JSESSIONID")
+                if not jsessionid:
+                    if attempt < 2:
+                        continue
+                    raise AcademicAdapterError(
+                        "登录页未返回 JSESSIONID。"
+                        f" 登录页内容前200字：{r.text[:200]}"
+                    )
+
+                # 尝试多种正则匹配 _sessionid（不同学校登录页格式略有差异）
+                session_id = None
+                session_id_patterns = [
+                    r'var\s+_sessionid\s*=\s*"([A-Fa-f0-9]+)"',       # 标准大写 hex
+                    r"var\s+_sessionid\s*=\s*'([A-Fa-f0-9]+)'",       # 单引号版本
+                    r"var\s+sessionid\s*=\s*['\"]([A-Fa-f0-9]+)['\"]",  # 变量名无下划线
+                    r'_sessionid["\']?\s*[:=]\s*["\']([A-Fa-f0-9]+)["\']',  # JSON/对象属性风格
+                ]
+                for pat in session_id_patterns:
+                    m = re.search(pat, r.text)
+                    if m:
+                        session_id = m.group(1)
+                        break
+
+                if not session_id:
+                    if attempt < 2:
+                        continue
+                    raise AcademicAdapterError(
+                        "无法从登录页提取 _sessionid（学校教务系统登录页格式可能不同）。"
+                        f" 登录页前300字：{r.text[:300]}"
+                    )
+
+                # 2) 动态参数
+                deskey = s.get(f"{self.base_url}/frame/homepage?method=getTempDeskey", timeout=30).text.strip()
+                nowtime = s.get(f"{self.base_url}/frame/homepage?method=getTempNowtime", timeout=30).text.strip()
+                if not deskey or not nowtime:
+                    if attempt < 2:
+                        continue
+                    raise AcademicAdapterError(
+                        "获取 deskey/nowtime 失败，教务系统可能不可用。"
+                        f" deskey={deskey[:50] if deskey else '(空)'}, nowtime={nowtime[:50] if nowtime else '(空)'}"
+                    )
+
+                # 3) 组装登录参数
+                params_u = base64.b64encode(f"{username};;{session_id}".encode()).decode()
+                real_pwd = md5_password or hashlib.md5(password.encode("utf-8")).hexdigest()
+                params_p = hashlib.md5((real_pwd + hashlib.md5(b"").hexdigest()).encode("utf-8")).hexdigest()
+
+                params_v1 = (
+                    f"_u={params_u}&_p={params_p}&randnumber=&isPasswordPolicy=1&"
+                    "txt_mm_expression=14&txt_mm_length=15&txt_mm_userzh=0&"
+                    "hid_flag=1&hidlag=1&hid_dxyzm="
+                )
+                token = hashlib.md5(
+                    (hashlib.md5(params_v1.encode()).hexdigest() + hashlib.md5(nowtime.encode()).hexdigest()).encode()
+                ).hexdigest()
+                params_v1_encoded = KingoDES.encrypt(params_v1, deskey)
+
+                post_body = f"params={params_v1_encoded}&token={token}&timestamp={nowtime}&deskey={deskey}&ssessionid={session_id}"
+                headers = {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": f"{self.base_url}/cas/login.action",
+                    "Cookie": f"JSESSIONID={jsessionid}",
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "X-Requested-With": "XMLHttpRequest",
+                }
+                r = s.post(f"{self.base_url}/cas/logon.action", data=post_body, headers=headers, timeout=30)
+                try:
+                    result = r.json()
+                except Exception:
+                    body_snippet = r.text[:500].replace("\n", " ").replace("\r", " ")
+                    if "凭证已失效" in body_snippet and attempt < 2:
+                        continue  # 凭证可能过期，重建 session 重试
+                    raise AcademicAdapterError(
+                        f"登录返回非 JSON（服务器返回了 HTML/脚本）。"
+                        f" 登录凭证 session/deskey 可能已失效或与该教务系统版本不兼容。"
+                        f" 服务器响应前500字：{body_snippet}"
+                    )
+                if str(result.get("status")) != "200":
+                    msg = result.get("message", "未知错误")
+                    code = result.get("status")
+                    # 300 = 无效请求，可能是凭证过期 → 重试
+                    if str(code) in ("300", "500") and attempt < 2:
+                        continue
+                    raise AcademicAdapterError(
+                        f"登录失败：{msg} (code={code})"
+                    )
+
+                return s, username
+
+            # 超过 3 次重试
+            raise AcademicAdapterError("教务系统登录重试 3 次均失败，请稍后再试或检查网络")
 
         self._session, self._user_code = await _asyncio.to_thread(_do_login)
         self._jsessionid = self._session.cookies.get("JSESSIONID")
@@ -188,7 +234,7 @@ class XiQueErAdapter(AcademicAdapter):
                 "Referer": f"{self.base_url}/student/xkjg.wdkb.jsp?menucode=S20301",
                 "Cookie": f"JSESSIONID={self._jsessionid}",
             }
-            r = self._session.get(url, headers=headers, timeout=10)
+            r = self._session.get(url, headers=headers, timeout=30)
             if r.status_code != 200:
                 raise AcademicAdapterError(f"课表请求失败：HTTP {r.status_code}")
             return r.text
