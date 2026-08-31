@@ -102,6 +102,21 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
   const [countdown, setCountdown] = useState<Countdown | null>(null)
   const [todayInfo, setTodayInfo] = useState<any>({})
 
+  // 教务系统导入
+  const [adapters, setAdapters] = useState<{ id: string; name: string }[]>([])
+  const [importLoading, setImportLoading] = useState(false)
+  const [guideOpen, setGuideOpen] = useState(false)
+
+  const importForm = useForm({
+    adapter: "",
+    base_url: "",
+    school_code: "",
+    username: "",
+    password: "",
+    semester_keyword: "",
+    semester_id: "",
+  })
+
   const semForm = useForm({
     name: "",
     start_date: "",
@@ -178,7 +193,60 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
     }
   }
 
-  useEffect(() => { refreshAll() }, [])
+  useEffect(() => {
+    refreshAll()
+    // 加载可用教务适配器
+    callEntry("list_academic_adapters").then((r: any) => {
+      setAdapters(r.adapters || [])
+      if ((r.adapters || []).length > 0) {
+        importForm.setField("adapter", r.adapters[0].id)
+      }
+    }).catch(() => {})
+  }, [])
+
+  async function doImportAcademic() {
+    const f = importForm.values
+    if (!f.adapter) { toast.error("请选择教务适配器"); return }
+    if (!f.username || !f.password) { toast.error("请填写学号和密码"); return }
+    // base_url 和 school_code 至少要有一个
+    if (!f.base_url && !f.school_code) { toast.error("请填写教务系统地址或学校代码"); return }
+    setImportLoading(true)
+    try {
+      const args: Record<string, any> = {
+        adapter: f.adapter,
+        username: f.username,
+        password: f.password,
+      }
+      if (f.base_url) args.base_url = f.base_url
+      if (f.school_code) args.school_code = f.school_code
+      if (f.semester_keyword) args.semester_selector = { keyword: f.semester_keyword }
+      const sid = Number(f.semester_id)
+      if (sid > 0) args.semester_id = sid
+
+      const r = await callEntry("import_from_academic", args)
+      const stats = r.stats || {}
+      const msg = [
+        `✅ 导入成功（适配器：${r.adapter || f.adapter}）`,
+        r.semester_fetched ? `学期：${r.semester_fetched.name || r.semester_fetched}` : null,
+        `课程：${stats.courses_created ?? "-"} 新建，${stats.courses_updated ?? "-"} 更新`,
+        `课时：${stats.sessions_created ?? "-"}`,
+        stats.skipped ? `跳过：${stats.skipped}` : null,
+      ].filter(Boolean).join(" | ")
+      toast.success(msg)
+      importForm.setValues({
+        ...importForm.values,
+        username: "",
+        password: "",
+        semester_keyword: "",
+        semester_id: "",
+      })
+      await refreshAll()
+    } catch (err: any) {
+      toast.error(String(err?.message || err))
+    } finally {
+      setImportLoading(false)
+    }
+  }
 
   async function addSemester() {
     if (!semForm.values.name || !semForm.values.start_date || !semForm.values.end_date) {
@@ -321,6 +389,51 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
           <Alert tone="warning">还没有学期，请在下方创建一个学期</Alert>
         ) : null}
 
+        {/* 使用教程 */}
+        <Card title="快速上手指引">
+          <Stack gap="md">
+            <Button size="sm" tone="primary" onClick={() => setGuideOpen((v) => !v)}>
+              {guideOpen ? "▼ 收起教程" : "▶ 展开教程"}
+            </Button>
+            {guideOpen ? (
+              <Stack gap="md">
+                <Alert tone="info">
+                  按下面 3 步走，即可完成初始化。最简单的方式是使用教务系统一键导入。
+                </Alert>
+                <Stack gap="xs">
+                  <Text tone="bold">① 创建学期</Text>
+                  <Text size="sm" tone="muted">
+                    在下方「学期管理」里填写学期名（如 2025 秋季）、开始 / 结束日期，点「添加学期」。
+                  </Text>
+                </Stack>
+                <Stack gap="xs">
+                  <Text tone="bold">② 添加课程（两种方式任选其一）</Text>
+                  <Text size="sm" tone="muted">
+                    A. 一键从教务系统导入：填写教务系统地址（或学校代码）+ 学号密码 → 自动拉取所有课程。
+                  </Text>
+                  <Text size="sm" tone="muted">
+                    B. 手动录入：在下方「添加课程」里逐门填写课程名、教师、地点、周几第几节。
+                  </Text>
+                </Stack>
+                <Stack gap="xs">
+                  <Text tone="bold">③ 作业 / 考试 / 提醒（可选）</Text>
+                  <Text size="sm" tone="muted">
+                    添加完课程后，可以在下方「作业管理」「考试管理」里添加作业和考试。上课提醒需在
+                    plugin.toml 的 [course] 段里把 remind_enabled 设为 true。
+                  </Text>
+                </Stack>
+                <Divider />
+                <Text tone="muted" size="sm">
+                  💡 更多功能（周重复 / 单双周 / 例外调课 / AI 查询）请见插件附带的使用指南文档，
+                  或直接向 AI 询问课程表相关问题。
+                </Text>
+              </Stack>
+            ) : (
+              <Text tone="muted" size="sm">创建学期 → 一键教务导入（或手动添加课程）→ 完成</Text>
+            )}
+          </Stack>
+        </Card>
+
         {/* 今日课表 */}
         <Card title="今日课表">
           {todaySessions.length > 0 ? (
@@ -390,6 +503,91 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
               </Field>
             </Grid>
             <Button tone="success" onClick={addSemester}>添加学期</Button>
+          </Stack>
+        </Card>
+
+        {/* 一键从教务系统导入 */}
+        <Card
+          title="🚀 一键从教务系统导入"
+          subtitle="最快的初始化方式 — 填账号密码即可拉取全部课程"
+        >
+          <Stack>
+            {adapters.length === 0 ? (
+              <Alert tone="warning">
+                未检测到可用的教务适配器。请确认插件已完整加载，或联系开发者添加适配器。
+              </Alert>
+            ) : (
+              <Text tone="muted" size="sm">
+                可用适配器：{adapters.map((a) => a.name).join("、")}
+              </Text>
+            )}
+            <Grid cols={3}>
+              <Field label="教务适配器">
+                <Select
+                  value={importForm.values.adapter}
+                  options={adapters.map((a) => ({ value: a.id, label: a.name }))}
+                  onChange={(v) => importForm.setField("adapter", String(v))}
+                />
+              </Field>
+              <Field label="教务系统地址">
+                <Input
+                  value={importForm.values.base_url}
+                  placeholder="https://your-school.jwxt.edu.cn"
+                  onChange={(v) => importForm.setField("base_url", v)}
+                />
+              </Field>
+              <Field label="或 学校代码">
+                <Input
+                  value={importForm.values.school_code}
+                  placeholder="如 12623（可选，有预设时不用填地址）"
+                  onChange={(v) => importForm.setField("school_code", v)}
+                />
+              </Field>
+              <Field label="学号 / 工号">
+                <Input
+                  value={importForm.values.username}
+                  placeholder="你的学号"
+                  onChange={(v) => importForm.setField("username", v)}
+                />
+              </Field>
+              <Field label="密码">
+                <Input
+                  value={importForm.values.password}
+                  placeholder="教务系统密码（仅本次请求）"
+                  onChange={(v) => importForm.setField("password", v)}
+                />
+              </Field>
+              <Field label="学期关键字（可选）">
+                <Input
+                  value={importForm.values.semester_keyword}
+                  placeholder="如 '2025秋'，不填则默认最新学期"
+                  onChange={(v) => importForm.setField("semester_keyword", v)}
+                />
+              </Field>
+            </Grid>
+            {activeSem ? (
+              <Field label={`导入到学期（当前：${activeSem.name}，可选）`}>
+                <Select
+                  value={importForm.values.semester_id}
+                  options={[
+                    { value: "", label: "自动创建 / 匹配" },
+                    ...semesters.map((s) => ({ value: String(s.id), label: s.name + (s.is_active ? " (当前)" : "") })),
+                  ]}
+                  onChange={(v) => importForm.setField("semester_id", String(v))}
+                />
+              </Field>
+            ) : null}
+            <Button
+              tone="primary"
+              onClick={doImportAcademic}
+              loading={importLoading}
+              disabled={importLoading || adapters.length === 0}
+            >
+              {importLoading ? "导入中…" : "🚀 一键导入"}
+            </Button>
+            <Alert tone="info">
+              导入时将自动创建 / 更新课程与课时。学号密码仅在本次请求中使用，不会被保存。
+            </Alert>
           </Stack>
         </Card>
 
