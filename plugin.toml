@@ -1,0 +1,53 @@
+[plugin]
+id = "course_schedule"
+name = "课程表"
+description = "通用课程表工具：周重复 + 例外时间模型。支持手动录入、文件/教务系统导入、AI 对话查询、上课提醒、作业考试管理、周数与倒计时。"
+short_description = "Universal course schedule: weekly recurring + exceptions, manual/file/academic import, AI query, class reminders, assignments, week count & countdown."
+keywords = ["课表", "课程表", "课程", "schedule", "timetable", "class", "上课", "提醒", "remind", "作业", "homework", "考试", "exam", "周数", "countdown", "倒计时", "学期", "semester", "教务", "时间表", "時間割", "시간표"]
+version = "0.1.0"
+entry = "plugin.plugins.course_schedule:CourseSchedulePlugin"
+
+[plugin.author]
+name = "N.E.K.O Team"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin.i18n]
+default_locale = "zh-CN"
+locales_dir = "i18n"
+
+[plugin.store]
+enabled = true
+
+[plugin.database]
+enabled = true
+
+[plugin.ui]
+enabled = true
+
+[[plugin.ui.panel]]
+id = "main"
+title = "课程表"
+entry = "ui/panel.tsx"
+context = "dashboard"
+permissions = [
+    "state:read",
+    "config:read",
+    "action:call",
+]
+
+[plugin_runtime]
+enabled = true
+auto_start = false
+
+[course]
+# 默认时区
+timezone = "Asia/Shanghai"
+# 上课提醒提前分钟数（P2 启用）
+remind_lead_minutes = 10
+# 是否启用上课提醒（P2 启用）
+remind_enabled = false
+# 提醒定时检查间隔（秒）
+remind_check_interval_seconds = 60
