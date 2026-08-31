@@ -54,6 +54,11 @@ class AcademicAdapter:
     async def pull(self, creds: dict[str, Any], semester_selector: dict | None = None) -> dict:
         """完整拉取流程：登录 → 选学期 → 拉课程 → 组装 normalized dict。"""
         await self.authenticate(creds)
+
+        # 把 semester_keyword 存到实例上，fetch_semesters() 可以读
+        if semester_selector and semester_selector.get("keyword"):
+            self._semester_keyword = semester_selector["keyword"]
+
         semesters = await self.fetch_semesters()
         if not semesters:
             raise AcademicAdapterError("适配器未返回任何学期")

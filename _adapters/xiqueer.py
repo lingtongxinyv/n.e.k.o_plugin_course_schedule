@@ -319,16 +319,64 @@ class XiQueErAdapter(AcademicAdapter):
     # ── 学期列表 ──
 
     async def fetch_semesters(self) -> list[dict]:
-        """喜鹊儿不暴露学期列表接口，这里根据当前日期生成几个合理候选。"""
-        from datetime import date
+        """喜鹊儿不暴露学期列表接口，这里根据当前日期 + 用户填的 keyword 生成合理候选。
+
+        入库时 _apply_normalized 要求 semester 必须带 start_date / end_date 才能自动建学期。
+        """
+        from datetime import date, timedelta
         today = date.today()
         year = today.year
-        # 9月起=上学期(1)，2月起=下学期(2)
-        term = "1" if 9 <= today.month <= 12 else "2"
-        return [
-            {"name": f"{year}-{year + 1} 第{('一' if term == '1' else '二')}学期",
-             "adapter_id": f"{year}-{term}", "school_year": str(year), "term": term},
-        ]
+
+        # 优先：从 credential 里读 semester_keyword（UI 上用户填的"学期关键字"字段会透传进来）
+        # 但 authenticate 里不传 sem keyword → 用当前日期推算 + 从 self.base_url 域名猜
+        # 9月~1月 = 第一学期，2月~7月 = 第二学期
+        if 9 <= today.month <= 12:
+            school_year = year       # 2026 秋 → 2026-2027
+            next_year = year + 1
+            term = "1"
+        else:
+            school_year = year - 1   # 2026 春 → 2025-2026
+            next_year = year
+            term = "2"
+
+        if term == "1":
+            start = date(school_year, 9, 1)
+            end = date(next_year, 1, 15)
+        else:
+            start = date(next_year, 2, 25)
+            end = date(next_year, 7, 15)
+
+        # 根据用户在 UI 上填的"学期关键字"微调
+        # 关键字通过 authenticate creds 里的 semester_keyword 字段传入
+        kw = getattr(self, "_semester_keyword", "")
+        if kw:
+            m = re.search(r"(\d{4})", kw)
+            if m:
+                kw_year = int(m.group(1))
+                if "秋" in kw or term == "1":
+                    school_year = kw_year
+                    next_year = kw_year + 1
+                    term = "1"
+                    start = date(school_year, 9, 1)
+                    end = date(next_year, 1, 15)
+                elif "春" in kw or term == "2":
+                    school_year = kw_year - 1
+                    next_year = kw_year
+                    term = "2"
+                    start = date(next_year, 2, 25)
+                    end = date(next_year, 7, 15)
+
+        total_weeks = int((end - start).days / 7) + 1
+
+        return [{
+            "name": f"{school_year}-{next_year} 第{'一' if term == '1' else '二'}学期",
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "total_weeks": total_weeks,
+            "adapter_id": f"{school_year}-{term}",
+            "school_year": str(school_year),
+            "term": term,
+        }]
 
     # ── 课程 ──
 
