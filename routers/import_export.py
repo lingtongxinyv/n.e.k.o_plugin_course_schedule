@@ -303,7 +303,6 @@ async def _apply_normalized(router: PluginRouter, data: dict, semester_id: int) 
 
 async def _build_normalized_for_export(router: PluginRouter, semester_id: int) -> dict:
     repo = router.main_plugin.repo
-    repo_db = None
 
     # 用 execute 查询 sessions
     async with await repo._session() as session:

@@ -10,6 +10,8 @@ finallyPermute / generateKeys / bt64ToHex
     KingoDES.encrypt(data, des_key) -> str      # 与 main.py 原 execjs 版同签名，含 base64
 """
 
+import base64
+
 
 def _str_to_bt(s):
     """JS strToBt: <=4 字符 -> 64 位 bit 数组；不足 4 字符补 0"""
@@ -195,9 +197,6 @@ def _bt64_to_hex(byte_data):
     )
 
 
-import base64 as _b64
-
-
 class KingoDES:
     """与原基于 execjs 的 KingoDES 同接口的纯 Python 替代。"""
 
@@ -218,4 +217,4 @@ class KingoDES:
                 temp_bt = _enc(temp_bt, kb)
             out.append(_bt64_to_hex(temp_bt))
         encrypted_hex = ''.join(out)
-        return _b64.b64encode(encrypted_hex.encode('utf-8')).decode('utf-8')
+        return base64.b64encode(encrypted_hex.encode('utf-8')).decode('utf-8')
