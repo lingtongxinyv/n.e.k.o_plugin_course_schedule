@@ -973,18 +973,7 @@ class XiQueErAdapter(AcademicAdapter):
 
 
 def _l(msg: str) -> None:
-    """调试日志：print 到 stdout，N.E.K.O 会捕获。"""
-    # executor 线程中 sys.stdout 可能被替换/重定向，同时使用 print(flush=True)
-    # 和 sys.stdout.write 两条路径，确保日志不会被丢掉
-    import sys
+    """调试日志：委托 _debuglog.dlog（宿主 logger + 插件文件 + stdout 三路输出）。"""
+    from . import _debuglog
 
-    line = str(msg) + "\n"
-    try:
-        sys.stdout.write(line)
-        sys.stdout.flush()
-    except Exception:
-        pass
-    try:
-        print(msg, flush=True)
-    except Exception:
-        pass
+    _debuglog.dlog(msg)

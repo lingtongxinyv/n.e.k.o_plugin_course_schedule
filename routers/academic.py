@@ -7,6 +7,7 @@ from plugin.sdk.shared.core.router import PluginRouter
 
 from .._academic_adapter import AcademicAdapterError
 from .._adapters import get_adapter, list_adapters
+from .._adapters._debuglog import dexc, dlog
 from .import_export import _apply_normalized
 
 
@@ -60,22 +61,37 @@ class AcademicRouter(PluginRouter):
         try:
             adp = get_adapter(adapter, base_url=base_url, school_code=school_code)
         except AcademicAdapterError as exc:
+            dlog(f"[academic] get_adapter({adapter!r}) failed: {exc}")
             return Err(SdkError(str(exc)))
 
+        dlog(
+            f"[academic] import_from_academic adapter={adapter!r} "
+            f"base_url={base_url!r} school_code={school_code!r} "
+            f"username={username!r} pwd_len={len(password)} "
+            f"semester_id={semester_id} selector={semester_selector!r}"
+        )
         try:
             data = await adp.pull(
                 creds={"username": username, "password": password, "md5_password": md5_password},
                 semester_selector=semester_selector,
             )
         except AcademicAdapterError as exc:
+            dlog(f"[academic] pull failed (adapter error): {exc}")
             return Err(SdkError(f"教务适配器错误：{exc}"))
         except Exception as exc:
+            dexc("[academic] pull failed (unexpected)", exc)
             return Err(SdkError(f"教务适配器异常：{exc}"))
 
+        dlog(
+            f"[academic] pull ok: semester={data.get('semester')!r} "
+            f"courses={len(data.get('courses') or [])} keys={sorted(data.keys())}"
+        )
         try:
             stats = await _apply_normalized(self, data, int(semester_id or 0))
         except Exception as exc:
+            dexc("[academic] apply_normalized failed", exc)
             return Err(SdkError(f"入库失败：{exc}"))
+        dlog(f"[academic] import done: stats={stats}")
         return Ok(
             {
                 "adapter": adapter,

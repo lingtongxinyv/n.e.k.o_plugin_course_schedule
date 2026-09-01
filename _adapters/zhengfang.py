@@ -121,7 +121,10 @@ def _normalize_base_url(raw: str) -> str:
 
 
 def _l(msg: str) -> None:
-    print(msg, flush=True)
+    """调试日志：委托 _debuglog.dlog（宿主 logger + 插件文件 + stdout 三路输出）。"""
+    from . import _debuglog
+
+    _debuglog.dlog(msg)
 
 
 class ZhengFangAdapter(AcademicAdapter):
