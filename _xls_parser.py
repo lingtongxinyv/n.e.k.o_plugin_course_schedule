@@ -162,13 +162,15 @@ def _ole2_read(data: bytes) -> bytes:
 
     # ── 直接扫描所有目录 entry，找 "Workbook" 或 "Book" ──
     # 不做树遍历——简单直接，够我们用
-    sector_off = lambda s: 512 + s * sector_size  # noqa: E731
+    def _sector_off(s: int) -> int:
+        return 512 + s * sector_size
+
     dir_entries: list[dict] = []
     cur_sec = first_dir_sector
     FAT_END = 0xFFFFFFFE
     FAT_SEC = 0xFFFFFFFD
     while cur_sec < FAT_SEC and cur_sec != FAT_END:
-        off = sector_off(cur_sec)
+        off = _sector_off(cur_sec)
         chunk = data[off : off + sector_size]
         for j in range(sector_size // DIR_ENTRY_SIZE):
             e = chunk[j * DIR_ENTRY_SIZE : (j + 1) * DIR_ENTRY_SIZE]
