@@ -817,7 +817,7 @@ class ImportExportRouter(PluginRouter):
                 return Err(SdkError(f"{fmt} 文件没有可读取的内容"))
             try:
                 # 直接矩阵解析（处理周课表网格）
-                from .._matrix_parser import parse_matrix_to_courses, _detect_weekly_grid
+                from .._matrix_parser import _detect_weekly_grid, parse_matrix_to_courses
 
                 data = parse_matrix_to_courses(matrix)
                 # 如果 grid 检测也失败了，说明不是标准周课表网格
@@ -1004,7 +1004,7 @@ class ImportExportRouter(PluginRouter):
         except Exception as exc:
             return Err(SdkError(f"{fmt} 解析失败: {exc}"))
 
-        from .._matrix_parser import parse_matrix_to_courses, _detect_weekly_grid, _find_period_col
+        from .._matrix_parser import _detect_weekly_grid, _find_period_col, parse_matrix_to_courses
 
         grid_info = _detect_weekly_grid(matrix)
         data = parse_matrix_to_courses(matrix)

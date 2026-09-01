@@ -762,7 +762,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
   const pendingHw = homework.filter((h) => h.done === 0).length
 
   return (
-    <Page title="课程表" subtitle={activeSem ? `${activeSem.name} · 第 ${activeWeekLabel}` : "请先创建学期"}>
+    <Page title="猫娘课程表" subtitle={activeSem ? `${activeSem.name} · 第 ${activeWeekLabel}` : "请先创建学期"}>
       <Stack gap="md">
 
         {/* ========== 顶部工具栏：状态 + 刷新 ========== */}

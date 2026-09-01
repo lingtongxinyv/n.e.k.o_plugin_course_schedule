@@ -492,8 +492,10 @@ def _split_teacher(text: str) -> tuple[str, str | None]:
         # 优先 teacher 长度是 3（XX老师 最常见格式），然后 4，然后 2
         def _score_hit(x):
             tlen, name, teacher = x
-            if tlen == 3: return (3, len(name))  # 3字teacher最优
-            if tlen == 4: return (2, len(name))
+            if tlen == 3:  # 3字teacher最优
+                return (3, len(name))
+            if tlen == 4:
+                return (2, len(name))
             return (1, len(name))  # 2字teacher最低
         teacher_suffix_hits.sort(key=_score_hit, reverse=True)
         return teacher_suffix_hits[0][1], teacher_suffix_hits[0][2]
