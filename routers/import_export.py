@@ -508,7 +508,29 @@ async def _apply_normalized(router: PluginRouter, data: dict, semester_id: int) 
     if sem is None:
         sem = await repo.get_active_semester()
     if sem is None:
-        raise ValueError("没有可用学期：请先 add_semester 或在导入数据里带 semester 块")
+        # 自动创建当前学期，避免用户先手动 add_semester 再导入
+        from datetime import date
+
+        today = date.today()
+        year = today.year
+        m = today.month
+        if 2 <= m <= 7:
+            # 春季学期：2月1日 ~ 6月30日
+            start = date(year, 2, 1)
+            end = date(year, 6, 30)
+            name = f"{year}春"
+        else:
+            # 秋季学期：9月1日 ~ 次年1月31日
+            start = date(year, 9, 1)
+            end = date(year + 1, 1, 31) if m >= 9 else date(year, 1, 31)
+            name = f"{year}秋"
+        sem = await repo.add_semester(
+            name=name,
+            start_date=start,
+            end_date=end,
+            total_weeks=20,
+            activate=True,
+        )
 
     created_courses = 0
     created_sessions = 0
