@@ -236,6 +236,26 @@ def parse_xlsx_bytes(data: bytes) -> list[list[str]]:
             if val is not None and val != "":
                 cells[(row_idx, col_idx)] = val
 
+    # ── 展开合并单元格 <mergeCells> ──
+    # Excel 合并后只有左上角 cell 有值，其余位置必须填充
+    for mc in tree.iter("{%s}mergeCell" % NS["main"]):
+        ref = mc.get("ref", "")  # 例: "B3:E5"
+        if ":" not in ref:
+            continue
+        top_left, bottom_right = ref.split(":", 1)
+        mt = CELL_REF_RE.match(top_left.strip())
+        mb = CELL_REF_RE.match(bottom_right.strip())
+        if not mt or not mb:
+            continue
+        c1, r1 = col_letter_to_index(mt.group(1)), int(mt.group(2))
+        c2, r2 = col_letter_to_index(mb.group(1)), int(mb.group(2))
+        top_val = cells.get((r1, c1), "")
+        if not top_val:
+            continue
+        for rr in range(r1, r2 + 1):
+            for cc in range(c1, c2 + 1):
+                cells[(rr, cc)] = top_val
+
     # 构造矩阵
     if max_row == 0 or max_col == 0:
         return []

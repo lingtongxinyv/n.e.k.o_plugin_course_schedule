@@ -23,7 +23,7 @@ from plugin.sdk.plugin.ui import context as ui_context
 
 from ._repo import ScheduleRepo
 from ._time import period_to_datetime, week_number, weekday_of
-from .routers import AcademicRouter, ImportExportRouter, ManageRouter, QueryRouter, TasksRouter
+from .routers import AcademicRouter, ClearDataRouter, ImportExportRouter, ManageRouter, QueryRouter, TasksRouter
 
 _DEFAULT_TZ = "Asia/Shanghai"
 
@@ -37,6 +37,7 @@ class CourseSchedulePlugin(NekoPluginBase):
         TasksRouter,
         ImportExportRouter,
         AcademicRouter,
+        ClearDataRouter,
     ]
 
     def __init__(self, ctx):

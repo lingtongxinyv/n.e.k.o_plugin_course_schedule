@@ -132,6 +132,12 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
   const [fileUploadName, setFileUploadName] = useState("")
   const [fileUploadLoading, setFileUploadLoading] = useState(false)
 
+  // 高级工具：清空/诊断
+  const [dangerLoading, setDangerLoading] = useState(false)
+  const [previewName, setPreviewName] = useState("")
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewResult, setPreviewResult] = useState<any>(null)
+
   // 完整周课表网格数据
   const [scheduleView, setScheduleView] = useState<{
     grid?: Record<number, Record<number, any[]>>
@@ -465,6 +471,68 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
     } catch (err: any) { toast.error(String(err?.message || err)) }
   }
 
+  async function doClearSchedule(alsoDeleteSemester = false) {
+    const semName = activeSem?.name ?? "当前学期"
+    const ok = await confirm({
+      title: alsoDeleteSemester ? "删除整个学期" : "清空课表数据",
+      message: alsoDeleteSemester
+        ? `确定要删除学期「${semName}」及其下所有课程、课时、作业、考试记录吗？学期本身也会被移除，此操作不可恢复！`
+        : `确定要清空学期「${semName}」的所有课程、上课安排、作业和考试吗？学期本身保留，此操作不可恢复！`,
+      tone: "danger",
+      confirmLabel: alsoDeleteSemester ? "彻底删除" : "全部清空",
+      cancelLabel: "取消",
+    })
+    if (!ok) return
+    setDangerLoading(true)
+    try {
+      const r = await callEntry("clear_schedule_data", { also_delete_semester: alsoDeleteSemester })
+      const d = r.deleted || {}
+      const parts = []
+      if (alsoDeleteSemester) parts.push("学期已删除")
+      if (d.courses) parts.push(`课程 ${d.courses} 门`)
+      if (d.sessions) parts.push(`课时 ${d.sessions} 节`)
+      if (d.exceptions) parts.push(`例外 ${d.exceptions} 条`)
+      if (d.assignments) parts.push(`作业/考试 ${d.assignments} 项`)
+      toast.success(parts.join("，") || "完成")
+      await refreshAll()
+    } catch (err: any) { toast.error(String(err?.message || err)) }
+    finally { setDangerLoading(false) }
+  }
+
+  async function doPreviewFile(file: File) {
+    setPreviewLoading(true)
+    setPreviewName(file.name + "  (" + Math.round(file.size / 1024) + " KB)")
+    setPreviewResult(null)
+    try {
+      const reader = new FileReader()
+      reader.onload = async () => {
+        try {
+          const dataUrl = reader.result as string
+          const r = await callEntry("preview_schedule_file", {
+            file_base64: dataUrl,
+            filename: file.name,
+          })
+          setPreviewResult(r)
+          const n = r.courses_found ?? 0
+          if (n > 0) toast.success(`解析成功，识别 ${n} 门课`)
+          else toast.warning("未能从文件中识别到课程数据，请查看下方诊断信息")
+        } catch (err: any) {
+          toast.error(String(err?.message || err))
+          setPreviewResult({ error: String(err?.message || err) })
+        } finally { setPreviewLoading(false) }
+      }
+      reader.onerror = () => { setPreviewLoading(false); toast.error("文件读取失败") }
+      reader.readAsDataURL(file)
+    } catch (err: any) { setPreviewLoading(false); toast.error(String(err?.message || err)) }
+  }
+
+  function onPreviewFileChange(e: ReactChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]
+    if (!f) return
+    doPreviewFile(f)
+    e.target.value = ""
+  }
+
   function renderWeekGrid() {
     if (!weekDays.length) return <EmptyState title="暂无本周数据" description="请先创建学期并添加课程" />
     return (
@@ -485,6 +553,53 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
     )
   }
 
+  /** 把课程色（hex/rgba/空）安全地转成半透明 rgba，用作卡片背景 */
+  function tintColor(raw: any, alpha = 0.12): string {
+    const s = String(raw || "").trim()
+    // hex #rgb 或 #rrggbb
+    const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(s)
+    if (hex) {
+      let h = hex[1]
+      if (h.length === 3) h = h.split("").map((c) => c + c).join("")
+      const r = parseInt(h.slice(0, 2), 16)
+      const g = parseInt(h.slice(2, 4), 16)
+      const b = parseInt(h.slice(4, 6), 16)
+      return `rgba(${r},${g},${b},${alpha})`
+    }
+    // 原生 rgba()/rgb() 直接返回（不做 tint，保持原样）
+    if (/^rgba?\(/i.test(s)) return s
+    return `rgba(79,148,205,${alpha})`
+  }
+
+  /** 对 block 数组做去重键；同一格可能多门课，但合并 rowspan 只看首门课的身份 */
+  function blockIdentity(block: any): string {
+    // 颜色归一化（空色用默认），避免前后端大小写/空白差异
+    const color = (block.color || "#4f94cd").toLowerCase().trim()
+    return JSON.stringify([
+      block.name || "",
+      block.teacher || "",
+      block.location || "",
+      color,
+    ])
+  }
+
+  /** 把 weeks 数组格式化成可读范围，如 [1..16] -> "1-16周"，[1,3,5] -> "第1/3/5周" */
+  function formatWeeks(weeks: any[] | undefined | null): string {
+    if (!weeks || !weeks.length) return ""
+    const nums = weeks
+      .map((w: any) => Number(w))
+      .filter((n: number) => Number.isFinite(n))
+      .sort((a: number, b: number) => a - b)
+    if (!nums.length) return ""
+    // 检测是否连续
+    let isRange = true
+    for (let i = 1; i < nums.length; i++) {
+      if (nums[i] !== nums[i - 1] + 1) { isRange = false; break }
+    }
+    if (isRange && nums.length > 1) return `${nums[0]}-${nums[nums.length - 1]}周`
+    return `第${nums.join("/")}周`
+  }
+
   function renderFullScheduleGrid() {
     const grid = scheduleView.grid || {}
     const periods = scheduleView.periods || PERIOD_SLOTS
@@ -494,54 +609,121 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
       return <EmptyState title="暂无课表数据" description="请先创建学期、导入或添加课程" />
     }
 
+    // ---- 只保留实际有课的 weekday ----
+    const ALL_WEEKDAYS = [1, 2, 3, 4, 5, 6, 7]
+    const presentWeekdays = ALL_WEEKDAYS.filter((wd) =>
+      periods.some((p) => (grid[wd]?.[p]?.length ?? 0) > 0),
+    )
+    if (presentWeekdays.length === 0) {
+      return <EmptyState title="课表为空" description="请先导入或添加课程" />
+    }
+    const usedWeekdays = presentWeekdays
+
+    // ---- 只保留头尾非空的 period 区间 ----
+    const hasCoursePerPeriod = periods.map((p) =>
+      usedWeekdays.some((wd) => (grid[wd]?.[p]?.length ?? 0) > 0),
+    )
+    let firstIdx = hasCoursePerPeriod.findIndex(Boolean)
+    let lastIdx = hasCoursePerPeriod.lastIndexOf(Boolean)
+    if (firstIdx === -1) { firstIdx = 0; lastIdx = periods.length - 1 }
+    const usedPeriods = periods.slice(firstIdx, lastIdx + 1)
+
+    // ---- 为每个 weekday 构建 rowspan 合并计划 ----
+    // 每一项: { startIdx, span, blocks }
+    type MergePlan = { startIdx: number; span: number; blocks: any[] }
+    const mergePlans: Record<number, MergePlan[]> = {}
+    for (const wd of usedWeekdays) {
+      const plans: MergePlan[] = []
+      let i = 0
+      while (i < usedPeriods.length) {
+        const pno = usedPeriods[i]
+        const curBlocks = (grid[wd] && grid[wd][pno]) || []
+        // 连续相同课程合并：当前与上一个计划的 blocks 首门课的 identity 相等
+        let span = 1
+        const baseBlocks = curBlocks
+        if (baseBlocks.length > 0) {
+          while (i + span < usedPeriods.length) {
+            const nextBlocks = (grid[wd] && grid[wd][usedPeriods[i + span]]) || []
+            if (
+              nextBlocks.length === baseBlocks.length &&
+              baseBlocks.every((b, k) => blockIdentity(b) === blockIdentity(nextBlocks[k]))
+            ) {
+              span++
+            } else break
+          }
+        }
+        plans.push({ startIdx: i, span, blocks: baseBlocks })
+        i += span
+      }
+      mergePlans[wd] = plans
+    }
+
+    // ---- 样式 ----
     const cellStyle: CSSProperties = {
-      border: "1px solid var(--border-color, rgba(0,0,0,0.1))",
-      padding: "6px 8px",
-      minHeight: 56,
+      border: "1px solid rgba(0,0,0,0.08)",
+      padding: "4px 6px",
       verticalAlign: "top",
       fontSize: 12,
+      minHeight: 48,
     }
     const headerStyle: CSSProperties = {
       ...cellStyle,
-      background: "var(--header-bg, rgba(0,0,0,0.04))",
+      background: "rgba(0,0,0,0.035)",
       fontWeight: 600,
       textAlign: "center",
-      minHeight: 32,
+      minHeight: 30,
     }
     const cornerStyle: CSSProperties = {
       ...headerStyle,
       width: 72,
       textAlign: "center",
+      whiteSpace: "nowrap",
     }
 
+    // ---- 渲染行 ----
     const rows: ReactNode[] = []
-    for (let ri = 0; ri < periods.length; ri++) {
-      const pno = periods[ri]
+    for (let ri = 0; ri < usedPeriods.length; ri++) {
+      const pno = usedPeriods[ri]
       const pinfo = pt[pno]
-      const timeLabel = pinfo ? `${pinfo.start_time}-${pinfo.end_time}` : `第${pno}节`
+      const timeLabel = pinfo ? `${pinfo.start_time}-${pinfo.end_time}` : ""
       const cells: React.ReactNode[] = [
         <td key="c" style={cornerStyle}>
           <div>第{pno}节</div>
-          <div style={{ fontWeight: 400, fontSize: 11, opacity: 0.7 }}>{timeLabel}</div>
+          {timeLabel ? <div style={{ fontWeight: 400, fontSize: 11, opacity: 0.65 }}>{timeLabel}</div> : null}
         </td>,
       ]
-      for (let wd = 1; wd <= 7; wd++) {
-        const blocks = (grid[wd] && grid[wd][pno]) || []
+      for (const wd of usedWeekdays) {
+        const plans = mergePlans[wd]
+        // 找到当前 ri 所在的 plan
+        const plan = plans.find((p) => p.startIdx === ri)
+        // 如果 ri 不是 plan 起点，说明已被 rowspan 吃掉，跳过
+        if (!plan) continue
+        const firstColor = plan.blocks[0]?.color || "#4f94cd"
+        const blockStyle: CSSProperties = {
+          background: tintColor(firstColor, 0.12),
+          borderRadius: 4,
+          padding: "3px 6px",
+          marginBottom: 3,
+          borderLeft: "3px solid " + firstColor,
+          overflowWrap: "anywhere",
+        }
         cells.push(
-          <td key={"w" + wd} style={cellStyle}>
-            {blocks.length === 0 ? null : blocks.map((b, bi) => (
-              <div key={bi} style={{
-                background: b.color || "rgba(79,148,205,0.12)",
-                borderRadius: 4,
-                padding: "3px 6px",
-                marginBottom: bi < blocks.length - 1 ? 3 : 0,
-                borderLeft: "3px solid " + (b.color || "#4f94cd"),
-              }}>
-                <div style={{ fontWeight: 600, fontSize: 12, lineHeight: 1.3 }}>{b.name}</div>
-                {b.teacher ? <div style={{ opacity: 0.75, fontSize: 11, lineHeight: 1.4 }}>{b.teacher}</div> : null}
-                {b.location ? <div style={{ opacity: 0.75, fontSize: 11, lineHeight: 1.4 }}>{b.location}</div> : null}
-              </div>
-            ))}
+          <td
+            key={"w" + wd}
+            style={{ ...cellStyle, background: plan.blocks.length === 0 ? undefined : "rgba(255,255,255,0.3)" }}
+            rowSpan={plan.span > 1 ? plan.span : undefined}
+          >
+            {plan.blocks.map((b: any, bi: number) => {
+              const wtext = formatWeeks(b.weeks)
+              return (
+                <div key={bi} style={blockStyle}>
+                  <div style={{ fontWeight: 600, fontSize: 12, lineHeight: 1.3, overflowWrap: "anywhere" }}>{b.name}</div>
+                  {b.teacher ? <div style={{ opacity: 0.75, fontSize: 11, lineHeight: 1.4 }}>{b.teacher}</div> : null}
+                  {b.location ? <div style={{ opacity: 0.75, fontSize: 11, lineHeight: 1.4, overflowWrap: "anywhere" }}>{b.location}</div> : null}
+                  {wtext ? <div style={{ opacity: 0.55, fontSize: 10, lineHeight: 1.4, marginTop: 1 }}>{wtext}</div> : null}
+                </div>
+              )
+            })}
           </td>,
         )
       }
@@ -550,12 +732,18 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
 
     return (
       <div style={{ overflowX: "auto" }}>
-        <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 720 }}>
+        <table
+          style={{
+            borderCollapse: "collapse",
+            tableLayout: "auto",
+            width: "100%",
+          }}
+        >
           <thead>
             <tr>
               <th style={cornerStyle}>节次</th>
-              {WEEKDAYS.map((d, i) => (
-                <th key={i} style={headerStyle}>{d}</th>
+              {usedWeekdays.map((wd) => (
+                <th key={wd} style={headerStyle}>{WEEKDAYS[wd - 1]}</th>
               ))}
             </tr>
           </thead>
@@ -933,6 +1121,126 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
               <Text style={{ fontSize: 11, opacity: 0.6 }}>
                 或直接把 Excel/教务系统表格内容复制到下方「表格粘贴导入」文本框
               </Text>
+            </Stack>
+          </Card>
+
+          {/* 高级工具：清空 + 诊断 */}
+          <Card title="高级工具">
+            <Stack gap="md">
+              <Warning>从错误的来源导入了垃圾数据？点下面的按钮一键清空重来。</Warning>
+
+              <Inline gap="xs">
+                <Button
+                  tone="danger"
+                  onClick={() => doClearSchedule(false)}
+                  disabled={dangerLoading || !activeSem}
+                >
+                  {dangerLoading ? "处理中..." : "清空课表数据（保留学期）"}
+                </Button>
+                <Button
+                  tone="danger"
+                  onClick={() => doClearSchedule(true)}
+                  disabled={dangerLoading || !activeSem}
+                >
+                  删除整个学期
+                </Button>
+                {!activeSem ? (
+                  <StatusBadge tone="warning">没有当前学期</StatusBadge>
+                ) : null}
+              </Inline>
+
+              <Divider />
+
+              <Stack gap="xs">
+                <Text style={{ fontSize: 12, opacity: 0.85 }}>
+                  上传文件但解析不出课程？试试「预览/诊断」看看程序在文件里检测到了什么。
+                  预览只读取文件不会写入数据库。
+                </Text>
+                <Inline gap="xs">
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls"
+                    onChange={onPreviewFileChange}
+                    style={{
+                      border: "1px dashed var(--border-color, rgba(0,0,0,0.2))",
+                      borderRadius: 6,
+                      padding: "8px 12px",
+                      cursor: "pointer",
+                      flex: 1,
+                    }}
+                  />
+                  {previewLoading ? (
+                    <StatusBadge tone="info">分析中...</StatusBadge>
+                  ) : previewName ? (
+                    <StatusBadge tone="success">{previewName}</StatusBadge>
+                  ) : null}
+                </Inline>
+
+                {previewResult ? (
+                  <div style={{
+                    background: "rgba(0,0,0,0.03)",
+                    borderRadius: 6,
+                    padding: 12,
+                    fontSize: 12,
+                    maxHeight: 360,
+                    overflowY: "auto",
+                    fontFamily: "monospace",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-all",
+                  }}>
+                    {previewResult.error ? (
+                      <span style={{ color: "#c33" }}>❌ {previewResult.error}</span>
+                    ) : (
+                      <>
+                        <div style={{ fontWeight: 600, marginBottom: 600 / 10000 }}>
+                          📊 文件分析结果
+                        </div>
+                        <div>文件格式: {previewResult.file_format}</div>
+                        <div>矩阵大小: {previewResult.matrix_rows} 行 × {previewResult.matrix_cols} 列</div>
+                        <div>课表网格检测: {previewResult.grid_detected ? "✅ 已检测到" : "❌ 未检测到（表头不含星期几？）"}</div>
+                        {previewResult.grid_info ? (
+                          <>
+                            <div style={{ marginTop: 6, fontWeight: 600 }}>网格定位:</div>
+                            <div>  数据起始行: 第 {previewResult.grid_info.top_row} 行</div>
+                            <div>  数据结束行: 第 {previewResult.grid_info.bottom_row} 行</div>
+                            <div>  星期列: {JSON.stringify(previewResult.grid_info.weekday_cols)}</div>
+                            <div>  节次列: {previewResult.grid_info.period_col ?? "未检测到"}</div>
+                          </>
+                        ) : null}
+                        <div style={{ marginTop: 6, fontWeight: 600 }}>
+                          解析课程数: {previewResult.courses_found}
+                        </div>
+                        {previewResult.courses && previewResult.courses.length > 0 ? (
+                          <div>
+                            {previewResult.courses.slice(0, 20).map((c: any, i: number) => (
+                              <div key={i} style={{ marginTop: 3 }}>
+                                • {c.name}
+                                {c.teacher ? `  教师=${c.teacher}` : ""}
+                                {c.location ? `  地点=${c.location}` : ""}
+                              </div>
+                            ))}
+                            {previewResult.courses.length > 20 ? (
+                              <div style={{ opacity: 0.6 }}>
+                                ...还有 {previewResult.courses.length - 20} 门
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {previewResult.raw_grid_preview && previewResult.raw_grid_preview.length > 0 ? (
+                          <>
+                            <div style={{ marginTop: 8, fontWeight: 600 }}>原始网格预览:</div>
+                            {previewResult.raw_grid_preview.map((row: string[], ri: number) => (
+                              <div key={ri} style={{ opacity: 0.75 }}>
+                                {row.join(" | ")}
+                              </div>
+                            ))}
+                          </>
+                        ) : null}
+                      </>
+                    )}
+                  </div>
+                ) : null}
+              </Stack>
             </Stack>
           </Card>
 

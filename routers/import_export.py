@@ -805,20 +805,35 @@ class ImportExportRouter(PluginRouter):
             try:
                 if fmt == "xls":
                     from .._xls_parser import parse_xls_bytes
-                    from .._xlsx_parser import matrix_to_table_text
 
                     matrix = parse_xls_bytes(file_bytes)
                 else:
-                    from .._xlsx_parser import matrix_to_table_text, parse_xlsx_bytes
+                    from .._xlsx_parser import parse_xlsx_bytes
 
                     matrix = parse_xlsx_bytes(file_bytes)
             except Exception as exc:
                 return Err(SdkError(f"{fmt} 解析失败: {exc}"))
             if not matrix:
                 return Err(SdkError(f"{fmt} 文件没有可读取的内容"))
-            text = matrix_to_table_text(matrix)
             try:
-                data = parse_table_paste(text)
+                # 直接矩阵解析（处理周课表网格）
+                from .._matrix_parser import parse_matrix_to_courses, _detect_weekly_grid
+
+                data = parse_matrix_to_courses(matrix)
+                # 如果 grid 检测也失败了，说明不是标准周课表网格
+                grid_info = _detect_weekly_grid(matrix)
+                if not data.get("courses") and not grid_info:
+                    return Err(SdkError(
+                        "未检测到周课表网格结构。"
+                        "请确认 Excel 包含「星期X」或「一/二/三」表头，"
+                        "或者使用手动录入 / AI 对话描述课程内容。"
+                    ))
+                if not data.get("courses") and grid_info:
+                    # 检测到 grid 但没解析出课程 —— 返回调试信息帮 AI 诊断
+                    return Err(SdkError(
+                        f"检测到课表网格（{grid_info[4]}）但未能提取课程数据。"
+                        f"请在 AI 对话中描述你的课程，或使用手动录入。"
+                    ))
             except Exception as exc:
                 return Err(SdkError(f"课表提取失败: {exc}"))
         elif fmt == "csv":
@@ -872,9 +887,9 @@ class ImportExportRouter(PluginRouter):
             "required": ["data"],
         },
     )
-    async def import_from_structured(self, data: dict, semester_id: int = 0, **_):
-        if not isinstance(data, dict):
-            return Err(SdkError("data 必须是对象"))
+    async def import_from_structured(self, data: dict | None = None, semester_id: int = 0, **_):
+        if data is None or not isinstance(data, dict):
+            return Err(SdkError("data 必须是对象且不能为空，示例：{courses:[{name:'高等数学',sessions:[{weekday:1,period_no:1}]}]}"))
         try:
             stats = await _apply_normalized(self, data, int(semester_id or 0))
         except Exception as exc:
@@ -937,6 +952,182 @@ class ImportExportRouter(PluginRouter):
                 "semester_id": sid,
                 "content": text,
                 "size": len(text),
+            }
+        )
+
+    # ── Debug：预览文件解析结果 ──
+
+    @plugin_entry(
+        id="preview_schedule_file",
+        name="预览课表文件解析",
+        description=(
+            "上传 xlsx / xls 文件，返回原始矩阵和解析结果。"
+            "用于 AI 诊断为什么解析不出课程。file_base64 为文件二进制的 base64。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "file_base64": {"type": "string", "description": "文件 base64 内容"},
+                "filename": {"type": "string", "description": "原始文件名，用于判断格式"},
+            },
+            "required": ["file_base64"],
+        },
+    )
+    async def preview_schedule_file(self, file_base64: str, filename: str = "", **_):
+        import base64
+
+        raw = file_base64.strip()
+        if "," in raw and raw.startswith("data:"):
+            raw = raw.split(",", 1)[1]
+        try:
+            file_bytes = base64.b64decode(raw, validate=True)
+        except Exception as exc:
+            return Err(SdkError(f"base64 解码失败: {exc}"))
+
+        ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
+        fmt = "xlsx" if ext == "xlsx" else "xls" if ext == "xls" else ""
+        if not fmt:
+            if file_bytes[:4] == b"\x50\x4b\x03\x04":
+                fmt = "xlsx"
+            elif file_bytes[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+                fmt = "xls"
+            else:
+                return Err(SdkError("无法识别文件格式"))
+
+        try:
+            if fmt == "xls":
+                from .._xls_parser import parse_xls_bytes
+                matrix = parse_xls_bytes(file_bytes)
+            else:
+                from .._xlsx_parser import parse_xlsx_bytes
+                matrix = parse_xlsx_bytes(file_bytes)
+        except Exception as exc:
+            return Err(SdkError(f"{fmt} 解析失败: {exc}"))
+
+        from .._matrix_parser import parse_matrix_to_courses, _detect_weekly_grid, _find_period_col
+
+        grid_info = _detect_weekly_grid(matrix)
+        data = parse_matrix_to_courses(matrix)
+        courses = data.get("courses") or []
+
+        # 构造预览信息
+        preview = {
+            "file_format": fmt,
+            "matrix_rows": len(matrix),
+            "matrix_cols": max((len(r) for r in matrix), default=0),
+            "grid_detected": grid_info is not None,
+            "grid_info": {
+                "top_row": grid_info[0],
+                "bottom_row": grid_info[1],
+                "left_col": grid_info[2],
+                "right_col": grid_info[3],
+                "weekday_cols": {str(k): v for k, v in grid_info[4].items()},
+                "period_col": _find_period_col(matrix, grid_info[0]) if grid_info else None,
+            } if grid_info else None,
+            "courses_found": len(courses),
+            "courses": [
+                {
+                    "name": c["name"],
+                    "teacher": c.get("teacher"),
+                    "location": c.get("location"),
+                    "sessions": [
+                        {"weekday": s["weekday"], "period_no": s["period_no"], "weeks": s.get("weeks")}
+                        for s in c.get("sessions", [])
+                    ],
+                }
+                for c in courses
+            ],
+        }
+
+        # 添加 grid 区域的原始内容预览（最多显示 15 行）
+        if grid_info:
+            top, bottom, left, right, _wd = grid_info
+            raw_grid = []
+            for r in range(top, min(bottom, top + 15)):
+                row = matrix[r] if r < len(matrix) else []
+                raw_grid.append([(row[c] if c < len(row) else "")[:80] for c in range(left, right + 1)])
+            preview["raw_grid_preview"] = raw_grid
+
+        return Ok(preview)
+
+
+class ClearDataRouter(PluginRouter):
+    """清空/重置数据的管理入口。"""
+
+    def __init__(self):
+        super().__init__(name="clear_data")
+
+    @property
+    def repo(self):
+        return self.main_plugin.repo
+
+    @plugin_entry(
+        id="clear_schedule_data",
+        name="清空课表数据",
+        description=(
+            "清空指定学期的所有课程、session（上课安排）。"
+            "semester_id 可空（空则清当前激活学期）。"
+            "这通常用于导入了错误/垃圾数据后想重新开始。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "semester_id": {"type": "integer", "description": "学期 ID，留空则清当前学期"},
+                "also_delete_semester": {"type": "boolean", "description": "是否同时删除学期本身，默认 false"},
+            },
+        },
+    )
+    async def clear_schedule_data(
+        self,
+        semester_id: int = 0,
+        also_delete_semester: bool = False,
+        **_,
+    ):
+        repo = self.repo
+        sid = int(semester_id or 0)
+        if not sid:
+            sem = await repo.get_active_semester()
+            if not sem:
+                return Err(SdkError("没有当前学期"))
+            sid = sem["id"]
+
+        async with await repo._session() as session:
+            # 查有多少数据会被删
+            cur = await session.execute("SELECT COUNT(*) as n FROM courses WHERE semester_id = ?", (sid,))
+            n_courses = cur.fetchone()["n"]
+            cur = await session.execute(
+                "SELECT COUNT(*) as n FROM course_sessions WHERE course_id IN "
+                "(SELECT id FROM courses WHERE semester_id = ?)",
+                (sid,),
+            )
+            n_sessions = cur.fetchone()["n"]
+            cur = await session.execute("SELECT COUNT(*) as n FROM exceptions WHERE semester_id = ?", (sid,))
+            n_exc = cur.fetchone()["n"]
+            cur = await session.execute("SELECT COUNT(*) as n FROM assignments WHERE semester_id = ?", (sid,))
+            n_hw = cur.fetchone()["n"]
+
+            # 先删 exceptions / assignments，再删 courses（FK cascade）
+            await session.execute("DELETE FROM exceptions WHERE semester_id = ?", (sid,))
+            await session.execute("DELETE FROM assignments WHERE semester_id = ?", (sid,))
+            await session.execute("DELETE FROM course_sessions WHERE course_id IN (SELECT id FROM courses WHERE semester_id = ?)", (sid,))
+            await session.execute("DELETE FROM courses WHERE semester_id = ?", (sid,))
+
+            if also_delete_semester:
+                await session.execute("DELETE FROM period_times WHERE semester_id = ?", (sid,))
+                await session.execute("DELETE FROM semesters WHERE id = ?", (sid,))
+
+            await session.commit()
+
+        return Ok(
+            {
+                "semester_id": sid,
+                "deleted": {
+                    "courses": n_courses,
+                    "sessions": n_sessions,
+                    "exceptions": n_exc,
+                    "assignments": n_hw,
+                    "semester": also_delete_semester,
+                },
             }
         )
 
