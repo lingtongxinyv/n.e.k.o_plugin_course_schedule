@@ -267,13 +267,15 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
     if (!csvText.trim()) { toast.error("请粘贴课程表格内容"); return }
     setCsvLoading(true)
     try {
-      const r = await callEntry("import_from_structured", {
+      const r = await callEntry("import_schedule", {
         format: "csv",
-        text: csvText,
+        content: csvText,
         semester_id: activeSem?.id || 0,
       })
       const stats = r.stats || {}
-      toast.success("导入成功：课程 " + (stats.courses || 0) + " 门，课时 " + (stats.sessions || 0) + " 节")
+      const nCourses = stats.created_courses ?? stats.courses ?? 0
+      const nSessions = stats.created_sessions ?? stats.sessions ?? 0
+      toast.success("导入成功：课程 " + nCourses + " 门，课时 " + nSessions + " 节")
       setCsvText("")
       await refreshAll()
     } catch (err: any) { toast.error(String(err?.message || err)) }

@@ -44,11 +44,277 @@ def _detect_format(content: str) -> str:
         return "json"
     if s.startswith("BEGIN:VCALENDAR") or s.startswith("BEGIN:VEVENT"):
         return "ics"
+    # 表格粘贴特征：制表符分隔 + 无 JSON/ICS 特征
+    # (Excel 复制出来通常是 \t 分隔)
+    first_line = content.splitlines()[0] if content else ""
+    if "\t" in first_line:
+        return "table"
     # 粗略判断 CSV：有表头逗号分隔
-    head = content.splitlines()[0] if content else ""
-    if "," in head and any(k in head.lower() for k in ("课", "课程", "星期", "weekday", "name")):
+    if "," in first_line and any(k in first_line.lower() for k in ("课", "课程", "星期", "weekday", "name")):
         return "csv"
-    return "json"  # 兜底
+    return "table"  # 兜底：任何非 JSON/ICS 都按表格粘贴处理
+
+
+_WEEKDAY_MAP: dict[str, int] = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "日": 7,
+    "天": 7,
+    "monday": 1,
+    "tuesday": 2,
+    "wednesday": 3,
+    "thursday": 4,
+    "friday": 5,
+    "saturday": 6,
+    "sunday": 7,
+    "mon": 1,
+    "tue": 2,
+    "wed": 3,
+    "thu": 4,
+    "fri": 5,
+    "sat": 6,
+    "sun": 7,
+}
+
+
+def parse_table_paste(content: str) -> dict:
+    """解析「从教务系统/Excel 直接复制粘贴」的课程表文本。
+
+    这类文本没有标准 CSV 表头，列数和顺序因学校而异，
+    但每行（或合并行）通常包含以下信息：
+      - 课程名（最稳定，永远有）
+      - 周几（周X / 星期X / weekday）
+      - 第几节（第X节 / X节 / X-Y节 / period）
+      - 周次范围（X-Y周 / 第X-Y周 / weeks）
+      - 教师 / 地点（可选，常有 [xxx] 前缀编号）
+
+    策略：先按制表符拆列（Excel 复制默认 \t），fallback 按多空格；
+    再用正则从每一行里提取关键字段，不依赖固定列位置。
+    同一门课（按规范化名称）聚合 sessions。
+    """
+    lines = [ln.rstrip("\r") for ln in content.splitlines() if ln.strip()]
+    if not lines:
+        return {"courses": []}
+
+    # 第一行是否像表头？（包含明显不是值的词）
+    header_words = (
+        "课程",
+        "course",
+        "班级",
+        "时间",
+        "地点",
+        "教师",
+        "学分",
+        "学时",
+        "教师",
+        "上课",
+        "总学时",
+        "修读",
+        "选课",
+        "星期",
+        "节次",
+    )
+    first_lower = lines[0].lower()
+    has_header = any(w.lower() in first_lower for w in header_words)
+    data_lines = lines[1:] if has_header else lines
+
+    courses_map: dict[str, dict] = {}
+
+    def _add_session(
+        name: str, wd: int | None, pno: int | None, weeks: list[int] | None, teacher: str | None, location: str | None
+    ) -> None:
+        if not name:
+            return
+        # 把类似 "[331006]体育与健康 (3)" 规范化成 "体育与健康"
+        clean = _normalize_course_name(name)
+        if not clean:
+            return
+        course = courses_map.setdefault(
+            clean,
+            {"name": clean, "teacher": teacher, "location": location, "sessions": []},
+        )
+        # 第一次出现时把 teacher/location 记下来（后续行如果为空则保留）
+        if teacher and not course.get("teacher"):
+            course["teacher"] = teacher
+        if location and not course.get("location"):
+            course["location"] = location
+        if wd and pno:
+            # 去重同一 (weekday, period_no)
+            key = (wd, pno)
+            if not any((s["weekday"], s["period_no"]) == key for s in course["sessions"]):
+                course["sessions"].append({"weekday": wd, "period_no": pno, "weeks": weeks})
+
+    for line in data_lines:
+        cells = _split_row(line)
+        flat = " ".join(cells)
+
+        wd = _extract_weekday(flat, cells)
+        pno = _extract_period(flat, cells)
+        weeks = _extract_weeks(flat, cells)
+        teacher = _extract_teacher(flat, cells)
+        location = _extract_location(flat, cells)
+        name = _extract_course_name(flat, cells)
+
+        if name:
+            _add_session(name, wd, pno, weeks, teacher, location)
+
+    return {"courses": list(courses_map.values())}
+
+
+def _split_row(line: str) -> list[str]:
+    """按制表符拆列；fallback 按 2+ 空格。"""
+    if "\t" in line:
+        cells = line.split("\t")
+    else:
+        cells = re.split(r"\s{2,}", line)
+    return [c.strip() for c in cells if c.strip()]
+
+
+def _extract_weekday(flat: str, cells: list[str]) -> int | None:
+    # 周[一二三四五六日天] / 星期[一二三四五六日天]
+    m = re.search(r"(?:星期|周)\s*([一二三四五六日天MONTHUEWEDTHFRISATSUN])", flat, re.I)
+    if m:
+        k = m.group(1)[0].lower()
+        if k in _WEEKDAY_MAP:
+            return _WEEKDAY_MAP[k]
+    # 数字独立出现 "周5" / "weekday=5"
+    m = re.search(r"(?:星期|周|weekday)\s*[:=]?\s*([1-7])\b", flat, re.I)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _extract_period(flat: str, cells: list[str]) -> int | None:
+    # 第X节 / X节
+    m = re.search(r"第\s*(\d+)\s*节?", flat)
+    if m:
+        return int(m.group(1))
+    # X-Y 独立数字（优先匹配 "X-Y节"）
+    m = re.search(r"\b(\d+)\s*[-~到至]\s*(\d+)\s*节?\b", flat)
+    if m:
+        return int(m.group(1))
+    # 单独一个数字在末尾附近（最后一个 cell 常是节次）
+    for c in reversed(cells):
+        m = re.match(r"^(\d+)$", c)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _extract_weeks(flat: str, cells: list[str]) -> list[int] | None:
+    # 范围匹配优先：X-Y周 / 第X-Y周 / X周-Y周
+    patterns_range = [
+        r"(?:第\s*)?(\d{1,2})\s*[-~到至]\s*(\d{1,2})\s*周",
+        r"(?:第\s*)?(\d{1,2})\s*周\s*[-~到至]\s*(\d{1,2})\s*周",
+    ]
+    for p in patterns_range:
+        m = re.search(p, flat)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            return list(range(min(a, b), max(a, b) + 1))
+    # 单周：前面不能是 "-"（避免在 "1-18周" 里抓到 "18周"）
+    m = re.search(r"(?<![-\d])(?:第\s*)?(\d{1,2})\s*周\b", flat)
+    if m:
+        return [int(m.group(1))]
+    return None
+
+
+def _extract_teacher(flat: str, cells: list[str]) -> str | None:
+    """优先从 cells 中找带 [4+位编号]姓名 格式、且不是课程名的那个单元。"""
+    BLACKLIST = {
+        "体育",
+        "体育与健康",
+        "大学英语",
+        "高等数学",
+        "线性代数",
+        "大学语文",
+        "大学物理",
+        "大学化学",
+        "大学计算机",
+        "思修",
+        "毛概",
+        "近代史",
+        "马原",
+        "形势与政策",
+        "军训",
+        "劳动教育",
+        "心理健康",
+        "已选中",
+        "已选",
+        "未选",
+    }
+    # 教师编号通常比课程编号长（4+ 位），课程编号常见短一些
+    for c in cells:
+        m = re.search(r"[\(\[【]\s*(\d{4,})\s*[\)\]】]\s*([\u4e00-\u9fff]{2,8})", c)
+        if m:
+            name = m.group(2).strip()
+            if name not in BLACKLIST:
+                return name
+    # 备选：从 flat 中找 [4+位数字]姓名，跳过紧跟课程的 (数字) 之后的第一个
+    m = re.search(
+        r"[（(]\s*\d+\s*[）)]\s+"  # 课程的 "(3)" 后缀
+        r"[\(\[【]\s*(\d{4,})\s*[\)\]】]\s*([\u4e00-\u9fff]{2,6})",
+        flat,
+    )
+    if m and m.group(2) not in BLACKLIST:
+        return m.group(2)
+    return None
+
+
+def _extract_location(flat: str, cells: list[str]) -> str | None:
+    # ① 明确带 "楼/栋/教/馆/室" 字样的短语，左右不能是 "周/节/课" 等干扰字
+    m = re.search(
+        r"(?<![周长节课\w])"
+        r"([A-Za-z\u4e00-\u9fff]{1,6}(?:楼|栋|教|馆|室|厅|场)"
+        r"[\-A-Za-z0-9\u4e00-\u9fff]{0,10})"
+        r"(?![周节课])",
+        flat,
+    )
+    if m:
+        return m.group(1).strip()
+    # ② 显式 "地点/教室:" 标签
+    m = re.search(r"(?:地点|教室|教学楼|上课地点)\s*[:：]?\s*([\u4e00-\u9fffA-Za-z0-9\-]+)", flat)
+    if m:
+        return m.group(1)
+    # ③ 兜底：最后几个 cell 里不包含 "周/节/课/时/分/选/数字" 的短串
+    for c in reversed(cells):
+        if 2 <= len(c) <= 12 and not re.search(r"[周节课学时学分修读班级选\d]", c):
+            return c
+    return None
+
+
+def _extract_course_name(flat: str, cells: list[str]) -> str | None:
+    """优先匹配 [code]课程名(备注) 这种完整模式，其次带中文的长字符串。"""
+    # 先从带 [] 的完整单元里抓最可能是课程的字段
+    for c in cells:
+        # [code]课程名(备注)  或  (code)课程名
+        m = re.search(
+            r"[\(\[【]\s*[A-Za-z0-9\-:]*\s*[\)\]】]\s*([\u4e00-\u9fffA-Za-z\s·\-]+?)"
+            r"(?:\s*[\(\（\[【][^)）\]\】]{0,30}[\)\）\]\】])?\s*$",
+            c,
+        )
+        if m and len(m.group(1).strip()) >= 2:
+            return m.group(1).strip()
+    # 兜底：第一个 3-25 字符的中文串
+    for c in cells:
+        if 3 <= len(c) <= 25 and re.search(r"[\u4e00-\u9fff]", c):
+            return c
+    return None
+
+
+def _normalize_course_name(name: str) -> str:
+    s = name.strip()
+    # 移除 [xxx] (xxx) 前缀
+    s = re.sub(r"^[\(\[【]\s*[A-Za-z0-9\-:]*\s*[\)\]】]\s*", "", s)
+    # 移除末尾括号备注 (3) / [实验]
+    s = re.sub(r"\s*[\(\（\[【].*?[\)\）\]】]\s*$", "", s)
+    # 统一空白
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 def parse_json(content: str) -> dict:
@@ -440,6 +706,8 @@ class ImportExportRouter(PluginRouter):
                 data = parse_json(content)
             elif fmt == "csv":
                 data = parse_csv(content)
+            elif fmt == "table":
+                data = parse_table_paste(content)
             elif fmt == "ics":
                 data = parse_ics(content)
             else:
