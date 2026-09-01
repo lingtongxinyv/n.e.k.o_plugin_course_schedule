@@ -780,22 +780,20 @@ class ImportExportRouter(PluginRouter):
                     fmt = "xls"
 
         if fmt in ("xlsx", "xls"):
-            if fmt == "xls":
-                return Err(
-                    SdkError(
-                        ".xls 旧格式暂不支持（无第三方库解析），"
-                        "请用 Excel 另存为 .xlsx 后再上传，"
-                        "或直接在 Excel 里 Ctrl+C 复制 → 粘贴到「表格粘贴导入」"
-                    )
-                )
             try:
-                from .._xlsx_parser import matrix_to_table_text, parse_xlsx_bytes
+                if fmt == "xls":
+                    from .._xls_parser import parse_xls_bytes
+                    from .._xlsx_parser import matrix_to_table_text
 
-                matrix = parse_xlsx_bytes(file_bytes)
+                    matrix = parse_xls_bytes(file_bytes)
+                else:
+                    from .._xlsx_parser import matrix_to_table_text, parse_xlsx_bytes
+
+                    matrix = parse_xlsx_bytes(file_bytes)
             except Exception as exc:
-                return Err(SdkError(f"xlsx 解析失败: {exc}"))
+                return Err(SdkError(f"{fmt} 解析失败: {exc}"))
             if not matrix:
-                return Err(SdkError("xlsx 文件没有可读取的内容"))
+                return Err(SdkError(f"{fmt} 文件没有可读取的内容"))
             text = matrix_to_table_text(matrix)
             try:
                 data = parse_table_paste(text)
