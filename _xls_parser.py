@@ -418,18 +418,144 @@ def _biff8_rowcol_to_matrix(sst: list[str], workbook_stream: bytes) -> list[list
 # ═══════════════════════════════════════════════════════════
 
 
-def parse_xls_bytes(data: bytes) -> list[list[str]]:
-    """解析 .xls 二进制数据，返回二维文本矩阵（行×列）。"""
-    workbook_stream = _ole2_read(data)
+# ═══════════════════════════════════════════════════════════
+# HTML-in-XLS fallback（教务系统常见做法：把 HTML 表格存成 .xls）
+# ═══════════════════════════════════════════════════════════
 
-    # 先解析 SST（共享字符串表）
-    sst: list[str] = []
-    for rec_id, payload in _iter_biff8_records(workbook_stream):
-        if rec_id == REC_SST:
-            sst = _parse_sst_payload(payload)
+
+def _parse_html_tables(data: bytes) -> list[list[str]]:
+    """从 HTML 里提取所有 <table> 的单元格为二维矩阵。
+
+    用 html.parser.HTMLParser 纯 stdlib 实现，不依赖任何第三方库。
+    多个 table 会被横向拼接成一个大矩阵（空单元格补 ""）。
+    """
+    from html.parser import HTMLParser
+
+    # 学校教务系统常见输出为 GBK 编码的 HTML
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        text = data.decode("gbk", errors="replace")
+    # 先切到 <table 开始，跳过前面的 html/head/script/style 垃圾
+    tables_texts: list[str] = []
+    i = 0
+    while True:
+        start = text.find("<table", i)
+        if start < 0:
             break
+        # 找对应的 </table>（简单配对，不处理嵌套）
+        j = text.lower().find("</table>", start + 1)
+        if j < 0:
+            break
+        tables_texts.append(text[start : j + 8])
+        i = j + 8
 
-    return _biff8_rowcol_to_matrix(sst, workbook_stream)
+    if not tables_texts:
+        raise ValueError("HTML 中未找到 <table> 标签")
+
+    class _TableParser(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.tables: list[list[list[str]]] = []
+            self.rows: list[list[str]] = []
+            self.cur_row: list[str] = []
+            self.cur_cell_parts: list[str] = []
+            self._in_cell = False  # td/th
+            self._in_table = False
+            self._in_tr = False
+            self._skip_depth = 0  # 嵌套表格/列表时跳过内部的 text 收集
+
+        def handle_starttag(self, tag, attrs):
+            tag = tag.lower()
+            if tag in ("script", "style"):
+                self._skip_depth += 1
+                return
+            if self._skip_depth:
+                if tag == "table":
+                    self._skip_depth += 1
+                return
+            if tag == "table":
+                self._in_table = True
+            elif tag == "tr" and self._in_table:
+                self._in_tr = True
+                if self.cur_row:
+                    self.rows.append(self.cur_row)
+                self.cur_row = []
+            elif tag in ("td", "th") and self._in_tr:
+                self._in_cell = True
+                self.cur_cell_parts = []
+
+        def handle_endtag(self, tag):
+            tag = tag.lower()
+            if self._skip_depth:
+                if tag == "script" or tag == "style":
+                    self._skip_depth -= 1
+                elif tag == "table":
+                    self._skip_depth -= 1
+                return
+            if tag in ("td", "th") and self._in_cell:
+                self._in_cell = False
+                cell = "".join(self.cur_cell_parts).strip()
+                self.cur_row.append(cell)
+                self.cur_cell_parts = []
+            elif tag == "tr" and self._in_tr:
+                self._in_tr = False
+                if self.cur_row:
+                    self.rows.append(self.cur_row)
+                self.cur_row = []
+            elif tag == "table" and self._in_table:
+                self._in_table = False
+                if self.rows:
+                    self.tables.append(self.rows)
+                self.rows = []
+
+        def handle_data(self, data):
+            if self._skip_depth or not self._in_cell:
+                return
+            self.cur_cell_parts.append(data)
+
+    # 把多个 table 合并成一个：取最大列数，每行补 ""
+    parser = _TableParser()
+    merged: list[list[str]] = []
+    for chunk in tables_texts:
+        parser.feed(chunk)
+    # parser.tables 里可能有多个 table，我们把它们纵向拼接
+    for table in parser.tables:
+        merged.extend(table)
+
+    if not merged:
+        raise ValueError("HTML table 解析出空矩阵")
+
+    # 统一列宽
+    max_cols = max(len(r) for r in merged)
+    for row in merged:
+        if len(row) < max_cols:
+            row.extend([""] * (max_cols - len(row)))
+
+    return merged
+
+
+def parse_xls_bytes(data: bytes) -> list[list[str]]:
+    """解析 .xls 数据，返回二维文本矩阵（行×列）。
+
+    自动检测真实 OLE2/BIFF8 和 HTML-in-XLS 两种常见格式。
+    """
+    # 先尝试真 OLE2
+    if data.startswith(OLE2_MAGIC):
+        workbook_stream = _ole2_read(data)
+        sst: list[str] = []
+        for rec_id, payload in _iter_biff8_records(workbook_stream):
+            if rec_id == REC_SST:
+                sst = _parse_sst_payload(payload)
+                break
+        return _biff8_rowcol_to_matrix(sst, workbook_stream)
+
+    # 尝试 HTML-in-XLS（教务系统常见，扩展名 .xls 但内容是 HTML <table>）
+    head = data[:200].lower()
+    if b"<!doctype html" in head or b"<html" in head or b"<table" in head[:500]:
+        return _parse_html_tables(data)
+
+    raise ValueError("不是有效的 OLE2/BIFF8 或 HTML-in-XLS 文件（魔数不匹配）")
 
 
 def parse_xls_file(path: str) -> list[list[str]]:
