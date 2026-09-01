@@ -681,17 +681,17 @@ class ImportExportRouter(PluginRouter):
 
     @plugin_entry(
         id="import_schedule",
-        name="导入课表（文件）",
+        name="导入课表（文本）",
         description=(
-            "从文本内容导入课表，format=json|csv|ics|auto（auto=自动检测）。"
-            "content 粘贴文件的原始文本内容。semester_id 留空则用当前学期；"
-            "若当前学期不存在，且 content 是带 semester 元信息的 JSON，会自动新建学期。"
+            "从文本内容导入课表，format=json|csv|ics|table|auto（auto=自动检测）。"
+            "content 粘贴文件的原始文本内容。semester_id 留空则用当前学期。"
+            "table 格式适配教务系统/Excel 复制粘贴的无固定表头课表。"
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "format": {"type": "string", "description": "json/csv/ics/auto，默认 auto"},
-                "content": {"type": "string", "description": "文件文本内容"},
+                "format": {"type": "string", "description": "json/csv/ics/table/auto，默认 auto"},
+                "content": {"type": "string", "description": "课表文本内容"},
                 "semester_id": {"type": "integer", "description": "目标学期 ID，可空"},
             },
             "required": ["content"],
@@ -720,6 +720,119 @@ class ImportExportRouter(PluginRouter):
         except Exception as exc:
             return Err(SdkError(f"入库失败: {exc}"))
         return Ok({"format": fmt, "stats": stats})
+
+    # ── 文件上传导入：base64 二进制 ──
+
+    @plugin_entry(
+        id="import_schedule_file",
+        name="导入课表（上传文件）",
+        description=(
+            "上传 xlsx / xls / csv / json / ics 文件导入课表。"
+            "file_base64 为文件二进制的 base64 字符串（去掉 data:xxx;base64, 前缀）。"
+            "filename 用于判断文件类型；也可传 format=xlsx|csv|json|ics 强制指定。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "file_base64": {"type": "string", "description": "文件 base64 内容"},
+                "filename": {"type": "string", "description": "原始文件名，用于判断格式"},
+                "format": {"type": "string", "description": "强制格式：xlsx/csv/json/ics"},
+                "semester_id": {"type": "integer", "description": "目标学期 ID，可空"},
+            },
+            "required": ["file_base64"],
+        },
+    )
+    async def import_schedule_file(
+        self,
+        file_base64: str,
+        filename: str = "",
+        format: str = "",
+        semester_id: int = 0,
+        **_,
+    ):
+        import base64
+
+        # 去掉 data:xxx;base64, 前缀
+        raw = file_base64.strip()
+        if "," in raw and raw.startswith("data:"):
+            raw = raw.split(",", 1)[1]
+
+        try:
+            file_bytes = base64.b64decode(raw, validate=True)
+        except Exception as exc:
+            return Err(SdkError(f"base64 解码失败: {exc}"))
+
+        fmt = (format or "").lower()
+        if not fmt:
+            ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
+            fmt = {
+                "xlsx": "xlsx",
+                "xls": "xls",
+                "csv": "csv",
+                "json": "json",
+                "ics": "ics",
+            }.get(ext, "")
+            if not fmt:
+                # fallback：按魔数判断
+                if file_bytes[:4] == b"\x50\x4b\x03\x04":  # ZIP
+                    fmt = "xlsx"
+                elif file_bytes[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":  # OLE2
+                    fmt = "xls"
+
+        if fmt in ("xlsx", "xls"):
+            if fmt == "xls":
+                return Err(
+                    SdkError(
+                        ".xls 旧格式暂不支持（无第三方库解析），"
+                        "请用 Excel 另存为 .xlsx 后再上传，"
+                        "或直接在 Excel 里 Ctrl+C 复制 → 粘贴到「表格粘贴导入」"
+                    )
+                )
+            try:
+                from .._xlsx_parser import matrix_to_table_text, parse_xlsx_bytes
+
+                matrix = parse_xlsx_bytes(file_bytes)
+            except Exception as exc:
+                return Err(SdkError(f"xlsx 解析失败: {exc}"))
+            if not matrix:
+                return Err(SdkError("xlsx 文件没有可读取的内容"))
+            text = matrix_to_table_text(matrix)
+            try:
+                data = parse_table_paste(text)
+            except Exception as exc:
+                return Err(SdkError(f"课表提取失败: {exc}"))
+        elif fmt == "csv":
+            try:
+                text = file_bytes.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                text = file_bytes.decode("gbk", errors="replace")
+            data = parse_csv(text)
+        elif fmt == "json":
+            try:
+                text = file_bytes.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                text = file_bytes.decode("utf-8", errors="replace")
+            data = parse_json(text)
+        elif fmt == "ics":
+            text = file_bytes.decode("utf-8-sig", errors="replace")
+            data = parse_ics(text)
+        else:
+            return Err(SdkError(f"不支持的文件格式：{filename or fmt}"))
+
+        try:
+            stats = await _apply_normalized(self, data, int(semester_id or 0))
+        except Exception as exc:
+            return Err(SdkError(f"入库失败: {exc}"))
+
+        n_courses = len(data.get("courses") or [])
+        return Ok(
+            {
+                "format": fmt,
+                "filename": filename,
+                "courses_detected": n_courses,
+                "stats": stats,
+            }
+        )
 
     # ── AI 对话 / 教务适配器：直接传结构化 dict ──
 

@@ -40,6 +40,7 @@ import {
   useConfirm,
 } from "@neko/plugin-ui"
 import type { PluginSurfaceProps } from "@neko/plugin-ui"
+import type { CSSProperties, ReactNode, ChangeEvent as ReactChangeEvent } from "react"
 
 type Session = {
   period_no: number
@@ -124,8 +125,19 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
   const [adapters, setAdapters] = useState<{ id: string; name: string }[]>([])
   const [importLoading, setImportLoading] = useState(false)
 
-  // Tab state: today / week / countdown
-  const [scheduleTab, setScheduleTab] = useState("today")
+  // Tab state: today / week / fullgrid / countdown
+  const [scheduleTab, setScheduleTab] = useState("fullgrid")
+
+  // 文件上传
+  const [fileUploadName, setFileUploadName] = useState("")
+  const [fileUploadLoading, setFileUploadLoading] = useState(false)
+
+  // 完整周课表网格数据
+  const [scheduleView, setScheduleView] = useState<{
+    grid?: Record<number, Record<number, any[]>>
+    periods?: number[]
+    period_times?: Record<number, { start_time: string; end_time: string }>
+  }>({})
 
   const importForm = useForm({
     adapter: "",
@@ -186,13 +198,14 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
       setActiveSem(active)
 
       if (active) {
-        const [today, week, cs, hw, ex, cd] = await Promise.all([
+        const [today, week, cs, hw, ex, cd, sv] = await Promise.all([
           callEntry("get_today_schedule"),
           callEntry("get_week_schedule"),
           callEntry("list_courses"),
           callEntry("list_homework"),
           callEntry("list_exams"),
           callEntry("get_countdown"),
+          callEntry("get_schedule_view", { semester_id: active.id }),
         ])
         setTodaySessions(today.sessions || [])
         setWeekDays(week.days || [])
@@ -200,6 +213,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
         setHomework(hw.homework || [])
         setExams(ex.exams || [])
         setCountdown(cd)
+        setScheduleView(sv)
       } else {
         setTodaySessions([])
         setWeekDays([])
@@ -207,6 +221,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
         setHomework([])
         setExams([])
         setCountdown(null)
+        setScheduleView({})
       }
     } catch (err: any) {
       toast.error(String(err?.message || err))
@@ -287,6 +302,49 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
       const r = await callEntry("export_schedule", { format: "csv" })
       toast.success("课程表已导出（" + (r.text || r.url || "请查看返回数据") + "）")
     } catch (err: any) { toast.error(String(err?.message || err)) }
+  }
+
+  async function doUploadFile(file: File) {
+    setFileUploadLoading(true)
+    try {
+      const reader = new FileReader()
+      reader.onload = async () => {
+        try {
+          const dataUrl = reader.result as string
+          // data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,....
+          const r = await callEntry("import_schedule_file", {
+            file_base64: dataUrl,
+            filename: file.name,
+            semester_id: activeSem?.id || 0,
+          })
+          const stats = r.stats || {}
+          const nCourses = stats.created_courses ?? stats.courses ?? 0
+          const nSessions = stats.created_sessions ?? stats.sessions ?? 0
+          const detected = r.courses_detected ?? 0
+          toast.success("文件导入成功：识别 " + detected + " 门课，新增 " + nCourses + " 门 / " + nSessions + " 节")
+          setFileUploadName("")
+          await refreshAll()
+        } catch (err: any) { toast.error(String(err?.message || err)) }
+        finally { setFileUploadLoading(false) }
+      }
+      reader.onerror = () => {
+        toast.error("文件读取失败")
+        setFileUploadLoading(false)
+      }
+      reader.readAsDataURL(file)
+    } catch (err: any) {
+      toast.error(String(err?.message || err))
+      setFileUploadLoading(false)
+    }
+  }
+
+  function onFileInputChange(e: ReactChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]
+    if (!f) return
+    setFileUploadName(f.name + "  (" + Math.round(f.size / 1024) + " KB)")
+    doUploadFile(f)
+    // 重置 input，允许连续选同一个文件
+    e.target.value = ""
   }
 
   async function addSemester() {
@@ -427,6 +485,86 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
     )
   }
 
+  function renderFullScheduleGrid() {
+    const grid = scheduleView.grid || {}
+    const periods = scheduleView.periods || PERIOD_SLOTS
+    const pt = scheduleView.period_times || {}
+
+    if (!periods.length) {
+      return <EmptyState title="暂无课表数据" description="请先创建学期、导入或添加课程" />
+    }
+
+    const cellStyle: CSSProperties = {
+      border: "1px solid var(--border-color, rgba(0,0,0,0.1))",
+      padding: "6px 8px",
+      minHeight: 56,
+      verticalAlign: "top",
+      fontSize: 12,
+    }
+    const headerStyle: CSSProperties = {
+      ...cellStyle,
+      background: "var(--header-bg, rgba(0,0,0,0.04))",
+      fontWeight: 600,
+      textAlign: "center",
+      minHeight: 32,
+    }
+    const cornerStyle: CSSProperties = {
+      ...headerStyle,
+      width: 72,
+      textAlign: "center",
+    }
+
+    const rows: ReactNode[] = []
+    for (let ri = 0; ri < periods.length; ri++) {
+      const pno = periods[ri]
+      const pinfo = pt[pno]
+      const timeLabel = pinfo ? `${pinfo.start_time}-${pinfo.end_time}` : `第${pno}节`
+      const cells: React.ReactNode[] = [
+        <td key="c" style={cornerStyle}>
+          <div>第{pno}节</div>
+          <div style={{ fontWeight: 400, fontSize: 11, opacity: 0.7 }}>{timeLabel}</div>
+        </td>,
+      ]
+      for (let wd = 1; wd <= 7; wd++) {
+        const blocks = (grid[wd] && grid[wd][pno]) || []
+        cells.push(
+          <td key={"w" + wd} style={cellStyle}>
+            {blocks.length === 0 ? null : blocks.map((b, bi) => (
+              <div key={bi} style={{
+                background: b.color || "rgba(79,148,205,0.12)",
+                borderRadius: 4,
+                padding: "3px 6px",
+                marginBottom: bi < blocks.length - 1 ? 3 : 0,
+                borderLeft: "3px solid " + (b.color || "#4f94cd"),
+              }}>
+                <div style={{ fontWeight: 600, fontSize: 12, lineHeight: 1.3 }}>{b.name}</div>
+                {b.teacher ? <div style={{ opacity: 0.75, fontSize: 11, lineHeight: 1.4 }}>{b.teacher}</div> : null}
+                {b.location ? <div style={{ opacity: 0.75, fontSize: 11, lineHeight: 1.4 }}>{b.location}</div> : null}
+              </div>
+            ))}
+          </td>,
+        )
+      }
+      rows.push(<tr key={"r" + ri}>{cells}</tr>)
+    }
+
+    return (
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 720 }}>
+          <thead>
+            <tr>
+              <th style={cornerStyle}>节次</th>
+              {WEEKDAYS.map((d, i) => (
+                <th key={i} style={headerStyle}>{d}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+    )
+  }
+
   // ===== 计算派生值 =====
   const activeWeekLabel = countdown?.week ? `${countdown.week}/${countdown.total_weeks}周` : "—"
   const weekProgress = countdown && countdown.total_weeks > 0 && countdown.week
@@ -486,6 +624,11 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
             activeId={scheduleTab}
             items={[
               {
+                id: "fullgrid",
+                label: "周课表",
+                content: renderFullScheduleGrid(),
+              },
+              {
                 id: "today",
                 label: `今日 (${todaySessions.length})`,
                 content: (
@@ -507,7 +650,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
               },
               {
                 id: "week",
-                label: "本周",
+                label: "本周概览",
                 content: renderWeekGrid(),
               },
               {
@@ -760,6 +903,38 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
               <Alert tone="warning">请先创建学期</Alert>
             </Card>
           )}
+
+          {/* 文件上传导入 */}
+          <Card title="上传课表文件">
+            <Stack gap="xs">
+              <Tip>
+                支持 .xlsx（Excel 2007+，推荐） / .csv / .json / .ics。选择文件后会自动识别格式、提取课程名/时间/教师/地点。
+                .xls 旧格式请用 Excel 另存为 .xlsx 后上传。
+              </Tip>
+              <Inline gap="xs">
+                <input
+                  type="file"
+                  accept=".xlsx,.xls,.csv,.json,.ics"
+                  onChange={onFileInputChange}
+                  style={{
+                    border: "1px dashed var(--border-color, rgba(0,0,0,0.2))",
+                    borderRadius: 6,
+                    padding: "8px 12px",
+                    cursor: "pointer",
+                    flex: 1,
+                  }}
+                />
+                {fileUploadLoading ? (
+                  <StatusBadge tone="info">上传中...</StatusBadge>
+                ) : fileUploadName ? (
+                  <StatusBadge tone="success">{fileUploadName}</StatusBadge>
+                ) : null}
+              </Inline>
+              <Text style={{ fontSize: 11, opacity: 0.6 }}>
+                或直接把 Excel/教务系统表格内容复制到下方「表格粘贴导入」文本框
+              </Text>
+            </Stack>
+          </Card>
 
           {/* 表格粘贴导入（CSV）*/}
           <Card title="表格粘贴导入">

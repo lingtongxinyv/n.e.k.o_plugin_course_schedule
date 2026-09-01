@@ -111,6 +111,77 @@ class QueryRouter(PluginRouter):
         )
 
     @plugin_entry(
+        id="get_schedule_view",
+        name="课表视图数据",
+        description=(
+            "返回周课表网格（weekday × period_no）的数据，用于前端渲染。"
+            "返回 grid[weekday][period_no] = [course_block, ...]，"
+            "其中 course_block 含课程名、教师、地点、周次等。"
+        ),
+    )
+    async def get_schedule_view(self, semester_id: int = 0, **_):
+        sid = int(semester_id or 0)
+        if not sid:
+            sem = await self.repo.get_active_semester()
+            if not sem:
+                return Err(SdkError("没有当前学期"))
+            sid = sem["id"]
+        import json as _json
+
+        async with await self.repo._session() as session:
+            cur = await session.execute(
+                "SELECT cs.weekday, cs.period_no, cs.weeks, "
+                "c.name, c.teacher, c.location, c.color "
+                "FROM course_sessions cs JOIN courses c ON c.id = cs.course_id "
+                "WHERE c.semester_id = ? "
+                "ORDER BY cs.weekday, cs.period_no",
+                (sid,),
+            )
+            blocks = cur.fetchall()
+
+        pt = await self.repo.get_period_times(sid)
+        # period_times 排序后的 period_no 列表
+        sorted_periods = sorted(pt.keys()) if pt else list(range(1, 12))
+
+        # 构造 grid: {weekday: {period_no: [block, ...]}}
+        grid: dict[int, dict[int, list[dict]]] = {wd: {pno: [] for pno in sorted_periods} for wd in range(1, 8)}
+        for r in blocks:
+            b = dict(r)
+            wd = int(b["weekday"])
+            pno = int(b["period_no"])
+            if wd not in grid:
+                continue
+            if pno not in grid[wd]:
+                grid[wd][pno] = []
+            weeks = []
+            if b.get("weeks"):
+                try:
+                    weeks = _json.loads(b["weeks"])
+                except Exception:
+                    pass
+            grid[wd][pno].append(
+                {
+                    "name": b["name"],
+                    "teacher": b.get("teacher") or "",
+                    "location": b.get("location") or "",
+                    "color": b.get("color") or "",
+                    "weeks": weeks,
+                    "period_no": pno,
+                    "weekday": wd,
+                }
+            )
+
+        return Ok(
+            {
+                "semester_id": sid,
+                "period_times": pt,
+                "periods": sorted_periods,
+                "grid": grid,
+                "weekdays": [1, 2, 3, 4, 5, 6, 7],
+            }
+        )
+
+    @plugin_entry(
         id="get_next_class",
         name="下节课",
         description="查询下一节课是什么、几点开始、还有多久（分钟）",
