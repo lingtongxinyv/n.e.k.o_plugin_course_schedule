@@ -533,39 +533,33 @@ async def _apply_normalized(router: PluginRouter, data: dict, semester_id: int) 
         )
 
     created_courses = 0
+    updated_courses = 0
     created_sessions = 0
     skipped_sessions = 0
     created_exceptions = 0
 
-    # 2) 课程
+    # 2) 课程 + 上课安排 —— 单事务批量插入（原实现每课每节各开一个 session，
+    #    一门课 10 节要 11+ 次 IPC 往返导致导入 30~40s 甚至超时）
+    course_dicts = []
     for cd in data.get("courses", []):
         name = (cd.get("name") or "").strip()
         if not name:
             continue
-        course = await repo.add_course(
-            semester_id=sem["id"],
-            name=name,
-            code=(cd.get("code") or None),
-            teacher=(cd.get("teacher") or None),
-            location=(cd.get("location") or None),
-            color=(cd.get("color") or None),
-            note=(cd.get("note") or None),
+        course_dicts.append(
+            {
+                "name": name,
+                "code": cd.get("code") or None,
+                "teacher": cd.get("teacher") or None,
+                "location": cd.get("location") or None,
+                "color": cd.get("color") or None,
+                "note": cd.get("note") or None,
+                "sessions": cd.get("sessions", []) or [],
+            }
         )
-        created_courses += 1
-        for s in cd.get("sessions", []) or []:
-            wd = s.get("weekday")
-            pno = s.get("period_no")
-            if not (1 <= int(wd) <= 7) or int(pno) < 1:
-                skipped_sessions += 1
-                continue
-            await repo.add_session(
-                course_id=course["id"],
-                weekday=int(wd),
-                period_no=int(pno),
-                weeks=s.get("weeks"),
-                note=s.get("note"),
-            )
-            created_sessions += 1
+    _inserted, created_sessions, skipped_sessions, updated_courses = await repo.import_courses_bulk(
+        semester_id=sem["id"], courses=course_dicts
+    )
+    created_courses = len(_inserted)
 
     # 3) 例外（需要第二次遍历课程按 name 查找 course_id）
     courses_all = await repo.list_courses(sem["id"])
@@ -600,6 +594,7 @@ async def _apply_normalized(router: PluginRouter, data: dict, semester_id: int) 
     return {
         "semester_id": sem["id"],
         "created_courses": created_courses,
+        "updated_courses": updated_courses,
         "created_sessions": created_sessions,
         "created_exceptions": created_exceptions,
         "skipped_sessions": skipped_sessions,

@@ -40,7 +40,7 @@ import {
   useConfirm,
 } from "@neko/plugin-ui"
 import type { PluginSurfaceProps } from "@neko/plugin-ui"
-import type { CSSProperties, ReactNode, ChangeEvent as ReactChangeEvent } from "react"
+import type { CSSProperties, ChangeEvent as ReactChangeEvent } from "react"
 
 type Session = {
   period_no: number
@@ -101,11 +101,59 @@ type Countdown = {
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 const PERIOD_SLOTS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
+type PeriodTimeRow = {
+  period_no: number
+  start_time: string
+  end_time: string
+  slot: string
+}
+
+// 与后端 _schema.DEFAULT_PERIOD_TIMES 保持一致
+const DEFAULT_PERIOD_TIMES_UI: PeriodTimeRow[] = [
+  { period_no: 1, start_time: "08:00", end_time: "08:45", slot: "morning" },
+  { period_no: 2, start_time: "08:55", end_time: "09:40", slot: "morning" },
+  { period_no: 3, start_time: "10:00", end_time: "10:45", slot: "morning" },
+  { period_no: 4, start_time: "10:55", end_time: "11:40", slot: "morning" },
+  { period_no: 5, start_time: "14:00", end_time: "14:45", slot: "afternoon" },
+  { period_no: 6, start_time: "14:55", end_time: "15:40", slot: "afternoon" },
+  { period_no: 7, start_time: "16:00", end_time: "16:45", slot: "afternoon" },
+  { period_no: 8, start_time: "16:55", end_time: "17:40", slot: "afternoon" },
+  { period_no: 9, start_time: "19:00", end_time: "19:45", slot: "evening" },
+  { period_no: 10, start_time: "19:55", end_time: "20:40", slot: "evening" },
+  { period_no: 11, start_time: "20:50", end_time: "21:35", slot: "evening" },
+]
+
+const SLOT_OPTIONS = [
+  { value: "morning", label: "上午" },
+  { value: "afternoon", label: "下午" },
+  { value: "evening", label: "晚上" },
+]
+
 function unwrap(result: any): any {
   if (!result) return {}
   if (result.data) return result.data
   if (result.result) return result.result
   return result
+}
+
+/** 从 get_schedule_view 返回的 period_times（键可能是 int/string）构造可编辑行 */
+function periodTimesFromView(sv: any): PeriodTimeRow[] {
+  const pt = sv?.period_times || {}
+  const keys = Object.keys(pt)
+    .map(Number)
+    .filter((n) => Number.isFinite(n))
+    .sort((a, b) => a - b)
+  const nos = keys.length ? keys : DEFAULT_PERIOD_TIMES_UI.map((r) => r.period_no)
+  return nos.map((n) => {
+    const info = pt[n] || pt[String(n)] || {}
+    const fallback = DEFAULT_PERIOD_TIMES_UI.find((r) => r.period_no === n)
+    return {
+      period_no: n,
+      start_time: info.start_time || fallback?.start_time || "",
+      end_time: info.end_time || fallback?.end_time || "",
+      slot: info.slot || fallback?.slot || "morning",
+    }
+  })
 }
 
 export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<string, any>>) {
@@ -142,8 +190,12 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
   const [scheduleView, setScheduleView] = useState<{
     grid?: Record<number, Record<number, any[]>>
     periods?: number[]
-    period_times?: Record<number, { start_time: string; end_time: string }>
+    period_times?: Record<number, { start_time: string; end_time: string; slot?: string }>
   }>({})
+
+  // 作息时间（上课时间）自定义编辑
+  const [periodTimes, setPeriodTimes] = useState<PeriodTimeRow[]>([])
+  const [periodTimesSaving, setPeriodTimesSaving] = useState(false)
 
   const importForm = useForm({
     adapter: "",
@@ -189,8 +241,17 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
     note: "",
   })
 
-  async function callEntry(entryId: string, args: Record<string, any> = {}): Promise<any> {
-    const result = await props.api.call(entryId, args)
+  async function callEntry(entryId: string, args: Record<string, any> = {}, opts?: { timeoutMs?: number }): Promise<any> {
+    const timeout = opts?.timeoutMs ?? 60_000
+    const apiPromise = Promise.resolve(props.api.call(entryId, args))
+    // Promise.race 超时保护：避免大文件 xls 解析或 IO 阻塞时 UI 永久卡死
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      const id = setTimeout(() => {
+        clearTimeout(id)
+        reject(new Error(`调用超时（${Math.round(timeout / 1000)}s）：${entryId}，可稍后重试或在日志查看具体错误。`))
+      }, timeout)
+    })
+    const result = await Promise.race([apiPromise, timeoutPromise])
     return unwrap(result)
   }
 
@@ -220,6 +281,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
         setExams(ex.exams || [])
         setCountdown(cd)
         setScheduleView(sv)
+        setPeriodTimes(periodTimesFromView(sv))
       } else {
         setTodaySessions([])
         setWeekDays([])
@@ -228,6 +290,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
         setExams([])
         setCountdown(null)
         setScheduleView({})
+        setPeriodTimes([])
       }
     } catch (err: any) {
       toast.error(String(err?.message || err))
@@ -264,7 +327,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
       const sid = Number(f.semester_id)
       if (sid > 0) args.semester_id = sid
 
-      const r = await callEntry("import_from_academic", args)
+      const r = await callEntry("import_from_academic", args, { timeoutMs: 120_000 })
       const stats = r.stats || {}
       const msg = [
         "导入成功（适配器：" + (r.adapter || f.adapter) + "）",
@@ -292,7 +355,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
         format: "csv",
         content: csvText,
         semester_id: activeSem?.id || 0,
-      })
+      }, { timeoutMs: 90_000 })
       const stats = r.stats || {}
       const nCourses = stats.created_courses ?? stats.courses ?? 0
       const nSessions = stats.created_sessions ?? stats.sessions ?? 0
@@ -322,12 +385,14 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
             file_base64: dataUrl,
             filename: file.name,
             semester_id: activeSem?.id || 0,
-          })
+          }, { timeoutMs: 180_000 })
           const stats = r.stats || {}
           const nCourses = stats.created_courses ?? stats.courses ?? 0
           const nSessions = stats.created_sessions ?? stats.sessions ?? 0
+          const nUpdated = stats.updated_courses ?? 0
           const detected = r.courses_detected ?? 0
-          toast.success("文件导入成功：识别 " + detected + " 门课，新增 " + nCourses + " 门 / " + nSessions + " 节")
+          const updatePart = nUpdated ? "，复用更新 " + nUpdated + " 门" : ""
+          toast.success("文件导入成功：识别 " + detected + " 门课，新增 " + nCourses + " 门 / " + nSessions + " 节" + updatePart)
           setFileUploadName("")
           await refreshAll()
         } catch (err: any) { toast.error(String(err?.message || err)) }
@@ -471,6 +536,58 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
     } catch (err: any) { toast.error(String(err?.message || err)) }
   }
 
+  // ── 作息时间（上课时间）自定义 ──
+  function updatePeriodRow(idx: number, patch: Partial<PeriodTimeRow>) {
+    setPeriodTimes((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)))
+  }
+
+  function addPeriodRow() {
+    setPeriodTimes((rows) => {
+      const nextNo = rows.length ? Math.max(...rows.map((r) => Number(r.period_no) || 0)) + 1 : 1
+      return [
+        ...rows,
+        { period_no: nextNo, start_time: "20:50", end_time: "21:35", slot: "evening" as string },
+      ]
+    })
+  }
+
+  function removePeriodRow(idx: number) {
+    setPeriodTimes((rows) => rows.filter((_, i) => i !== idx))
+  }
+
+  function resetPeriodTimes() {
+    setPeriodTimes(DEFAULT_PERIOD_TIMES_UI.map((r) => ({ ...r })))
+  }
+
+  async function savePeriodTimes() {
+    if (!activeSem) { toast.error("请先创建学期"); return }
+    if (periodTimes.length === 0) { toast.error("请至少保留一节作息时间"); return }
+    for (const r of periodTimes) {
+      if (!/^\d{1,2}:\d{2}$/.test(r.start_time) || !/^\d{1,2}:\d{2}$/.test(r.end_time)) {
+        toast.error(`第${r.period_no}节时间格式错误，需为 HH:MM（如 08:00）`)
+        return
+      }
+    }
+    setPeriodTimesSaving(true)
+    try {
+      await callEntry("set_period_times", {
+        semester_id: activeSem.id,
+        periods: periodTimes.map((r) => ({
+          period_no: Number(r.period_no),
+          start_time: r.start_time,
+          end_time: r.end_time,
+          slot: r.slot || "morning",
+        })),
+      })
+      toast.success("作息时间已保存")
+      await refreshAll()
+    } catch (err: any) {
+      toast.error(String(err?.message || err))
+    } finally {
+      setPeriodTimesSaving(false)
+    }
+  }
+
   async function doClearSchedule(alsoDeleteSemester = false) {
     const semName = activeSem?.name ?? "当前学期"
     const ok = await confirm({
@@ -485,7 +602,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
     if (!ok) return
     setDangerLoading(true)
     try {
-      const r = await callEntry("clear_schedule_data", { also_delete_semester: alsoDeleteSemester })
+      const r = await callEntry("clear_schedule_data", { also_delete_semester: alsoDeleteSemester }, { timeoutMs: 60_000 })
       const d = r.deleted || {}
       const parts = []
       if (alsoDeleteSemester) parts.push("学期已删除")
@@ -511,7 +628,7 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
           const r = await callEntry("preview_schedule_file", {
             file_base64: dataUrl,
             filename: file.name,
-          })
+          }, { timeoutMs: 180_000 })
           setPreviewResult(r)
           const n = r.courses_found ?? 0
           if (n > 0) toast.success(`解析成功，识别 ${n} 门课`)
@@ -601,70 +718,84 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
   }
 
   function renderFullScheduleGrid() {
-    const grid = scheduleView.grid || {}
-    const periods = scheduleView.periods || PERIOD_SLOTS
-    const pt = scheduleView.period_times || {}
+    const rawGrid: any = scheduleView.grid || {}
+    // SDK 将 Python dict 转 JSON 时，int 键(weekday/period_no)会被转成字符串键，
+    // 这里在 UI 层做一次归一（也兼容 UI 手动造的数据）。
+    const grid: Record<number, Record<number, any[]>> = {}
+    for (const wk of Object.keys(rawGrid)) {
+      const wd = Number(wk)
+      if (!Number.isFinite(wd)) continue
+      const innerIn: any = rawGrid[wk] || {}
+      const inner: Record<number, any[]> = {}
+      for (const pk of Object.keys(innerIn)) {
+        const pno = Number(pk)
+        if (Number.isFinite(pno) && Array.isArray(innerIn[pk])) {
+          inner[pno] = innerIn[pk]
+        }
+      }
+      grid[wd] = inner
+    }
+    const periods: number[] =
+      Array.isArray(scheduleView.periods) && scheduleView.periods.length
+        ? (scheduleView.periods as any[]).map(Number).filter((n) => Number.isFinite(n))
+        : PERIOD_SLOTS
+    // period_times: 兼容 int/string 键（JSON 序列化把 int 转 string）
+    const rawPt: any = scheduleView.period_times || {}
+    const pt: Record<number, { start_time: string; end_time: string; slot?: string }> = {}
+    for (const k of Object.keys(rawPt)) {
+      const n = Number(k)
+      if (Number.isFinite(n) && rawPt[k]) pt[n] = rawPt[k]
+    }
 
-    if (!periods.length) {
-      return <EmptyState title="暂无课表数据" description="请先创建学期、导入或添加课程" />
+    // 安全的索引辅助：从 grid[wd][pno] 取 block 列表
+    function getBlocks(wd: number, pno: number): any[] {
+      const inner = grid[wd]
+      if (!inner) return []
+      const arr = inner[pno]
+      return Array.isArray(arr) ? arr : []
+    }
+
+    // 每格 block 按身份去重（重复导入可能产生同课多条记录）
+    function cellBlocks(wd: number, pno: number): any[] {
+      const seen = new Set<string>()
+      const out: any[] = []
+      for (const b of getBlocks(wd, pno)) {
+        if (!b || typeof b !== "object") continue
+        const id = blockIdentity(b)
+        if (seen.has(id)) continue
+        seen.add(id)
+        out.push(b)
+      }
+      return out
     }
 
     // ---- 只保留实际有课的 weekday ----
     const ALL_WEEKDAYS = [1, 2, 3, 4, 5, 6, 7]
     const presentWeekdays = ALL_WEEKDAYS.filter((wd) =>
-      periods.some((p) => (grid[wd]?.[p]?.length ?? 0) > 0),
+      periods.some((p) => getBlocks(wd, p).length > 0),
     )
     if (presentWeekdays.length === 0) {
       return <EmptyState title="课表为空" description="请先导入或添加课程" />
     }
-    const usedWeekdays = presentWeekdays
 
     // ---- 只保留头尾非空的 period 区间 ----
     const hasCoursePerPeriod = periods.map((p) =>
-      usedWeekdays.some((wd) => (grid[wd]?.[p]?.length ?? 0) > 0),
+      presentWeekdays.some((wd) => getBlocks(wd, p).length > 0),
     )
     let firstIdx = hasCoursePerPeriod.findIndex(Boolean)
     let lastIdx = hasCoursePerPeriod.lastIndexOf(Boolean)
     if (firstIdx === -1) { firstIdx = 0; lastIdx = periods.length - 1 }
     const usedPeriods = periods.slice(firstIdx, lastIdx + 1)
 
-    // ---- 为每个 weekday 构建 rowspan 合并计划 ----
-    // 每一项: { startIdx, span, blocks }
-    type MergePlan = { startIdx: number; span: number; blocks: any[] }
-    const mergePlans: Record<number, MergePlan[]> = {}
-    for (const wd of usedWeekdays) {
-      const plans: MergePlan[] = []
-      let i = 0
-      while (i < usedPeriods.length) {
-        const pno = usedPeriods[i]
-        const curBlocks = (grid[wd] && grid[wd][pno]) || []
-        // 连续相同课程合并：当前与上一个计划的 blocks 首门课的 identity 相等
-        let span = 1
-        const baseBlocks = curBlocks
-        if (baseBlocks.length > 0) {
-          while (i + span < usedPeriods.length) {
-            const nextBlocks = (grid[wd] && grid[wd][usedPeriods[i + span]]) || []
-            if (
-              nextBlocks.length === baseBlocks.length &&
-              baseBlocks.every((b, k) => blockIdentity(b) === blockIdentity(nextBlocks[k]))
-            ) {
-              span++
-            } else break
-          }
-        }
-        plans.push({ startIdx: i, span, blocks: baseBlocks })
-        i += span
-      }
-      mergePlans[wd] = plans
-    }
-
-    // ---- 样式 ----
+    // ---- 样式（div 网格：宿主对 <table><tbody> 动态行支持不可靠，div+flex 最稳）----
     const cellStyle: CSSProperties = {
       border: "1px solid rgba(0,0,0,0.08)",
       padding: "4px 6px",
-      verticalAlign: "top",
       fontSize: 12,
-      minHeight: 48,
+      flex: "1 1 0",
+      minWidth: 110,
+      minHeight: 52,
+      boxSizing: "border-box",
     }
     const headerStyle: CSSProperties = {
       ...cellStyle,
@@ -675,80 +806,93 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
     }
     const cornerStyle: CSSProperties = {
       ...headerStyle,
-      width: 72,
+      flex: "0 0 76px",
+      width: 76,
+      minWidth: 76,
       textAlign: "center",
       whiteSpace: "nowrap",
     }
-
-    // ---- 渲染行 ----
-    const rows: ReactNode[] = []
-    for (let ri = 0; ri < usedPeriods.length; ri++) {
-      const pno = usedPeriods[ri]
-      const pinfo = pt[pno]
-      const timeLabel = pinfo ? `${pinfo.start_time}-${pinfo.end_time}` : ""
-      const cells: React.ReactNode[] = [
-        <td key="c" style={cornerStyle}>
-          <div>第{pno}节</div>
-          {timeLabel ? <div style={{ fontWeight: 400, fontSize: 11, opacity: 0.65 }}>{timeLabel}</div> : null}
-        </td>,
-      ]
-      for (const wd of usedWeekdays) {
-        const plans = mergePlans[wd]
-        // 找到当前 ri 所在的 plan
-        const plan = plans.find((p) => p.startIdx === ri)
-        // 如果 ri 不是 plan 起点，说明已被 rowspan 吃掉，跳过
-        if (!plan) continue
-        const firstColor = plan.blocks[0]?.color || "#4f94cd"
-        const blockStyle: CSSProperties = {
-          background: tintColor(firstColor, 0.12),
-          borderRadius: 4,
-          padding: "3px 6px",
-          marginBottom: 3,
-          borderLeft: "3px solid " + firstColor,
-          overflowWrap: "anywhere",
-        }
-        cells.push(
-          <td
-            key={"w" + wd}
-            style={{ ...cellStyle, background: plan.blocks.length === 0 ? undefined : "rgba(255,255,255,0.3)" }}
-            rowSpan={plan.span > 1 ? plan.span : undefined}
-          >
-            {plan.blocks.map((b: any, bi: number) => {
-              const wtext = formatWeeks(b.weeks)
-              return (
-                <div key={bi} style={blockStyle}>
-                  <div style={{ fontWeight: 600, fontSize: 12, lineHeight: 1.3, overflowWrap: "anywhere" }}>{b.name}</div>
-                  {b.teacher ? <div style={{ opacity: 0.75, fontSize: 11, lineHeight: 1.4 }}>{b.teacher}</div> : null}
-                  {b.location ? <div style={{ opacity: 0.75, fontSize: 11, lineHeight: 1.4, overflowWrap: "anywhere" }}>{b.location}</div> : null}
-                  {wtext ? <div style={{ opacity: 0.55, fontSize: 10, lineHeight: 1.4, marginTop: 1 }}>{wtext}</div> : null}
-                </div>
-              )
-            })}
-          </td>,
-        )
-      }
-      rows.push(<tr key={"r" + ri}>{cells}</tr>)
+    const rowStyle: CSSProperties = {
+      display: "flex",
+      flexDirection: "row",
+      alignItems: "stretch",
     }
 
-    return (
-      <div style={{ overflowX: "auto" }}>
-        <table
+    // 课程卡片（或与上一节同课时的延续条）
+    function renderBlock(b: any, bi: number, prevIds: Set<string>) {
+      const color = b.color || "#4f94cd"
+      if (prevIds.has(blockIdentity(b))) {
+        return (
+          <div
+            key={bi}
+            style={{
+              height: 12,
+              background: tintColor(color, 0.1),
+              borderLeft: "3px solid " + color,
+              borderRadius: 3,
+              marginBottom: 4,
+            }}
+          />
+        )
+      }
+      const wtext = formatWeeks(Array.isArray(b.weeks) ? b.weeks : null)
+      return (
+        <div
+          key={bi}
           style={{
-            borderCollapse: "collapse",
-            tableLayout: "auto",
-            width: "100%",
+            background: tintColor(color, 0.12),
+            borderRadius: 4,
+            padding: "3px 6px",
+            marginBottom: 4,
+            borderLeft: "3px solid " + color,
+            overflowWrap: "anywhere",
           }}
         >
-          <thead>
-            <tr>
-              <th style={cornerStyle}>节次</th>
-              {usedWeekdays.map((wd) => (
-                <th key={wd} style={headerStyle}>{WEEKDAYS[wd - 1]}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>{rows}</tbody>
-        </table>
+          <div style={{ fontWeight: 600, fontSize: 12, lineHeight: 1.3, overflowWrap: "anywhere" }}>{String(b.name || "")}</div>
+          {b.teacher ? <div style={{ opacity: 0.75, fontSize: 11, lineHeight: 1.4 }}>{String(b.teacher)}</div> : null}
+          {b.location ? <div style={{ opacity: 0.75, fontSize: 11, lineHeight: 1.4, overflowWrap: "anywhere" }}>{String(b.location)}</div> : null}
+          {wtext ? <div style={{ opacity: 0.55, fontSize: 10, lineHeight: 1.4, marginTop: 1 }}>{wtext}</div> : null}
+        </div>
+      )
+    }
+
+    // ---- 渲染：div 行 × div 格；双节连排用上一节延续条视觉表达 ----
+    return (
+      <div style={{ overflowX: "auto" }}>
+        <div style={{ minWidth: 96 + 110 * presentWeekdays.length }}>
+          {/* 表头 */}
+          <div style={rowStyle}>
+            <div style={cornerStyle}>节次</div>
+            {presentWeekdays.map((wd) => (
+              <div key={"h" + wd} style={headerStyle}>{WEEKDAYS[wd - 1]}</div>
+            ))}
+          </div>
+          {/* 节次行 */}
+          {usedPeriods.map((pno, ri) => {
+            const pinfo = pt[pno]
+            const timeLabel = pinfo && typeof pinfo.start_time === "string" ? `${pinfo.start_time}-${pinfo.end_time}` : ""
+            const prevPno = ri > 0 ? usedPeriods[ri - 1] : null
+            return (
+              <div key={"r" + ri} style={rowStyle}>
+                <div style={cornerStyle}>
+                  <div>第{pno}节</div>
+                  {timeLabel ? <div style={{ fontWeight: 400, fontSize: 11, opacity: 0.65 }}>{timeLabel}</div> : null}
+                </div>
+                {presentWeekdays.map((wd) => {
+                  const blocks = cellBlocks(wd, pno)
+                  const prevIds = new Set<string>(
+                    prevPno != null ? cellBlocks(wd, prevPno).map(blockIdentity) : [],
+                  )
+                  return (
+                    <div key={"w" + wd} style={cellStyle}>
+                      {blocks.map((b: any, bi: number) => renderBlock(b, bi, prevIds))}
+                    </div>
+                  )
+                })}
+              </div>
+            )
+          })}
+        </div>
       </div>
     )
   }
@@ -952,6 +1096,51 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
             </Stack>
           </Card>
 
+          {/* 作息时间（上课时间）自定义 */}
+          {activeSem ? (
+            <Card title="作息时间（上课时间设置）">
+              <Stack gap="xs">
+                <Tip>
+                  自定义每节课的起止时间；周课表角标时间、「下节课」提醒、今日课表都会使用这里的设置。
+                  修改后点「保存作息时间」生效。
+                </Tip>
+                {periodTimes.map((r, idx) => (
+                  <Inline key={idx} gap="xs">
+                    <Text style={{ width: 56, fontWeight: 600 }}>第{r.period_no}节</Text>
+                    <Input
+                      value={r.start_time}
+                      placeholder="08:00"
+                      onChange={(v) => updatePeriodRow(idx, { start_time: v })}
+                    />
+                    <Text>–</Text>
+                    <Input
+                      value={r.end_time}
+                      placeholder="08:45"
+                      onChange={(v) => updatePeriodRow(idx, { end_time: v })}
+                    />
+                    <Select
+                      value={r.slot}
+                      options={SLOT_OPTIONS}
+                      onChange={(v) => updatePeriodRow(idx, { slot: String(v) })}
+                    />
+                    <Button tone="danger" onClick={() => removePeriodRow(idx)}>删除</Button>
+                  </Inline>
+                ))}
+                <Inline gap="xs">
+                  <Button tone="default" onClick={addPeriodRow}>添加一节</Button>
+                  <Button tone="default" onClick={resetPeriodTimes}>恢复默认</Button>
+                  <Button
+                    tone="primary"
+                    onClick={savePeriodTimes}
+                    disabled={periodTimesSaving || !activeSem}
+                  >
+                    {periodTimesSaving ? "保存中..." : "保存作息时间"}
+                  </Button>
+                </Inline>
+              </Stack>
+            </Card>
+          ) : null}
+
           {/* 一键从教务系统导入 */}
           <Card title="一键从教务系统导入">
             <Stack gap="xs">
@@ -1096,8 +1285,8 @@ export default function CourseSchedulePanel(props: PluginSurfaceProps<Record<str
           <Card title="上传课表文件">
             <Stack gap="xs">
               <Tip>
-                支持 .xlsx（Excel 2007+，推荐） / .csv / .json / .ics。选择文件后会自动识别格式、提取课程名/时间/教师/地点。
-                .xls 旧格式请用 Excel 另存为 .xlsx 后上传。
+                支持 .xlsx / .xls（含教务系统常见的 HTML 伪 xls，自动展开合并单元格）/ .csv / .json / .ics。
+                选择文件后会自动识别格式、提取课程名/时间/教师/地点；重复导入不会产生重复数据。
               </Tip>
               <Inline gap="xs">
                 <input

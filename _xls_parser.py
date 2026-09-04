@@ -28,6 +28,7 @@ REC_RK = 0x027E
 REC_MULRK = 0x00BD
 REC_INDEX = 0x000B  # cell range 索引
 REC_DIMENSION = 0x0200  # 边界范围
+REC_MERGEDCELLS = 0x00E5  # 合并单元格区域列表（EasyExcel 会自动展开）
 
 
 # ═══════════════════════════════════════════════════════════
@@ -347,9 +348,23 @@ def _biff8_rowcol_to_matrix(sst: list[str], workbook_stream: bytes) -> list[list
     cells: dict[tuple[int, int], str] = {}
     max_row = 0
     max_col = 0
+    # 合并单元格区域：[(rwFirst, rwLast, colFirst, colLast), ...]（0-based 闭区间）
+    merged_ranges: list[tuple[int, int, int, int]] = []
 
     for rec_id, payload in _iter_biff8_records(workbook_stream):
-        if rec_id == REC_NUMBER:
+        if rec_id == REC_MERGEDCELLS:
+            # MERGEDCELLS: cwrect(2B, uint16) + cwrect × 8B
+            # 每个区域 = rwFirst(2), rwLast(2), colFirst(2), colLast(2)
+            if len(payload) >= 2:
+                count = struct.unpack_from("<H", payload, 0)[0]
+                off = 2
+                for _ in range(count):
+                    if off + 8 > len(payload):
+                        break
+                    r1, r2, c1, c2 = struct.unpack_from("<HHHH", payload, off)
+                    off += 8
+                    merged_ranges.append((r1, r2, c1, c2))
+        elif rec_id == REC_NUMBER:
             # row(2), col(2), double(8)
             if len(payload) >= 12:
                 row, col, dval = struct.unpack_from("<HHd", payload, 0)
@@ -404,6 +419,22 @@ def _biff8_rowcol_to_matrix(sst: list[str], workbook_stream: bytes) -> list[list
         elif rec_id == REC_DIMENSION:
             pass
 
+    # ── 展开合并单元格（EasyExcel 语义：合并区域只有左上角有值，其余位置补同值）──
+    # 课表 Excel 中课程格常跨 2 行（双节课）、节次/星期标签跨列跨行，
+    # 不展开会导致列错位、星期归属错乱。
+    for r1, r2, c1, c2 in merged_ranges:
+        top_val = cells.get((r1, c1), "")
+        if not top_val:
+            continue
+        for rr in range(r1, r2 + 1):
+            for cc in range(c1, c2 + 1):
+                if (rr, cc) not in cells:
+                    cells[(rr, cc)] = top_val
+        if r2 > max_row:
+            max_row = r2
+        if c2 > max_col:
+            max_col = c2
+
     # 构造矩阵
     if max_row == 0 or max_col == 0:
         return []
@@ -455,17 +486,35 @@ def _parse_html_tables(data: bytes) -> list[list[str]]:
     if not tables_texts:
         raise ValueError("HTML 中未找到 <table> 标签")
 
+    def _span_int(v, default=1):
+        try:
+            n = int(str(v).strip())
+        except (TypeError, ValueError):
+            return default
+        if n < 1:
+            return default
+        return min(n, 50)  # 防御异常大值
+
     class _TableParser(HTMLParser):
+        """解析 <table> 为二维矩阵，自动展开 rowspan/colspan（EasyExcel 语义）。
+
+        用 occupied 集合记录已被占位的 (row, col)；每个 td/th 按其
+        rowspan/colspan 把同一文本填入矩形区域的所有格子。
+        """
+
         def __init__(self):
             super().__init__(convert_charrefs=True)
             self.tables: list[list[list[str]]] = []
-            self.rows: list[list[str]] = []
-            self.cur_row: list[str] = []
+            self.grid: list[list[str]] = []
+            self.occupied: set[tuple[int, int]] = set()
+            self.row_idx = -1
+            self.cell_start: tuple[int, int] | None = None
+            self.cell_rs = 1
+            self.cell_cs = 1
             self.cur_cell_parts: list[str] = []
-            self._in_cell = False  # td/th
-            self._in_table = False
-            self._in_tr = False
-            self._skip_depth = 0  # 嵌套表格/列表时跳过内部的 text 收集
+            self._in_cell = False
+            self._table_depth = 0
+            self._skip_depth = 0  # script/style 内跳过
 
         def handle_starttag(self, tag, attrs):
             tag = tag.lower()
@@ -473,55 +522,83 @@ def _parse_html_tables(data: bytes) -> list[list[str]]:
                 self._skip_depth += 1
                 return
             if self._skip_depth:
-                if tag == "table":
-                    self._skip_depth += 1
                 return
             if tag == "table":
-                self._in_table = True
-            elif tag == "tr" and self._in_table:
-                self._in_tr = True
-                if self.cur_row:
-                    self.rows.append(self.cur_row)
-                self.cur_row = []
-            elif tag in ("td", "th") and self._in_tr:
+                self._table_depth += 1
+                if self._table_depth == 1:
+                    self.grid = []
+                    self.occupied = set()
+                    self.row_idx = -1
+            elif tag == "tr" and self._table_depth == 1:
+                self.row_idx += 1
+                while len(self.grid) <= self.row_idx:
+                    self.grid.append([])
+            elif tag in ("td", "th") and self._table_depth == 1 and self.row_idx >= 0:
+                attrs_d = dict(attrs)
+                self.cell_rs = _span_int(attrs_d.get("rowspan"), 1)
+                self.cell_cs = _span_int(attrs_d.get("colspan"), 1)
+                # 找当前行第一个未被占位的列
+                c = 0
+                while (self.row_idx, c) in self.occupied:
+                    c += 1
+                self.cell_start = (self.row_idx, c)
                 self._in_cell = True
                 self.cur_cell_parts = []
+            elif tag == "br" and self._in_cell:
+                # <br> 换行：保留单元格内多行结构（课程名/教师/周次常分行）
+                self.cur_cell_parts.append("\n")
 
         def handle_endtag(self, tag):
             tag = tag.lower()
-            if self._skip_depth:
-                if tag == "script" or tag == "style":
-                    self._skip_depth -= 1
-                elif tag == "table":
+            if tag in ("script", "style"):
+                if self._skip_depth:
                     self._skip_depth -= 1
                 return
-            if tag in ("td", "th") and self._in_cell:
+            if self._skip_depth:
+                return
+            if tag in ("td", "th") and self._in_cell and self.cell_start is not None:
                 self._in_cell = False
-                cell = "".join(self.cur_cell_parts).strip()
-                self.cur_row.append(cell)
+                text = "".join(self.cur_cell_parts).strip()
+                r0, c0 = self.cell_start
+                # 把同一值填入 rowspan×colspan 矩形区域的所有格子
+                for rr in range(r0, r0 + self.cell_rs):
+                    while len(self.grid) <= rr:
+                        self.grid.append([])
+                    row = self.grid[rr]
+                    for cc in range(c0, c0 + self.cell_cs):
+                        self.occupied.add((rr, cc))
+                        while len(row) <= cc:
+                            row.append("")
+                        row[cc] = text
+                self.cell_start = None
                 self.cur_cell_parts = []
-            elif tag == "tr" and self._in_tr:
-                self._in_tr = False
-                if self.cur_row:
-                    self.rows.append(self.cur_row)
-                self.cur_row = []
-            elif tag == "table" and self._in_table:
-                self._in_table = False
-                if self.rows:
-                    self.tables.append(self.rows)
-                self.rows = []
+            elif tag == "table" and self._table_depth >= 1:
+                if self._table_depth == 1 and self.grid:
+                    # 统一列宽
+                    width = max((len(r) for r in self.grid), default=0)
+                    for r in self.grid:
+                        if len(r) < width:
+                            r.extend([""] * (width - len(r)))
+                    # 丢弃全空行
+                    cleaned = [r for r in self.grid if any(x.strip() for x in r)]
+                    if cleaned:
+                        self.tables.append(cleaned)
+                self._table_depth -= 1
+                if self._table_depth == 0:
+                    self.grid = []
+                    self.occupied = set()
+                    self.row_idx = -1
 
         def handle_data(self, data):
             if self._skip_depth or not self._in_cell:
                 return
             self.cur_cell_parts.append(data)
 
-    # 把多个 table 合并成一个：取最大列数，每行补 ""
+    # 把多个 table 纵向拼接成一个矩阵
     parser = _TableParser()
     merged: list[list[str]] = []
     for chunk in tables_texts:
         parser.feed(chunk)
-    # parser.tables 里可能有多个 table，我们把它们纵向拼接
     for table in parser.tables:
         merged.extend(table)
 

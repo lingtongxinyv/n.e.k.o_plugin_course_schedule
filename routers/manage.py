@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import re
+
 from plugin.sdk.plugin import Err, Ok, SdkError, plugin_entry
 from plugin.sdk.shared.core.router import PluginRouter
 
 from .._time import parse_date
+
+_HHMM_RE = re.compile(r"^\d{1,2}:\d{2}$")
+_VALID_SLOTS = ("morning", "afternoon", "evening")
 
 
 class ManageRouter(PluginRouter):
@@ -268,6 +273,36 @@ class ManageRouter(PluginRouter):
     async def set_period_times(self, periods: list, semester_id: int = 0, **_):
         if not periods:
             return Err(SdkError("periods 不能为空"))
+        # 校验并归一化
+        cleaned: list[dict] = []
+        seen_nos: set[int] = set()
+        for p in periods:
+            if not isinstance(p, dict):
+                return Err(SdkError(f"periods 每项必须是对象: {p!r}"))
+            try:
+                pno = int(p.get("period_no"))
+            except (TypeError, ValueError):
+                return Err(SdkError(f"节次号必须是整数: {p.get('period_no')!r}"))
+            if pno < 1 or pno > 30:
+                return Err(SdkError(f"节次号需在 1-30 之间: 第{pno}节"))
+            st = str(p.get("start_time") or "").strip()
+            et = str(p.get("end_time") or "").strip()
+            if not _HHMM_RE.match(st) or not _HHMM_RE.match(et):
+                return Err(SdkError(f"第{pno}节时间格式错误，需为 HH:MM（如 08:00）"))
+            sh, sm = (int(x) for x in st.split(":"))
+            eh, em = (int(x) for x in et.split(":"))
+            if not (0 <= sh <= 23 and 0 <= sm <= 59 and 0 <= eh <= 23 and 0 <= em <= 59):
+                return Err(SdkError(f"第{pno}节时间超出合法范围"))
+            slot = str(p.get("slot") or "morning").strip()
+            if slot not in _VALID_SLOTS:
+                slot = "morning"
+            if pno in seen_nos:
+                continue
+            seen_nos.add(pno)
+            cleaned.append({"period_no": pno, "start_time": st, "end_time": et, "slot": slot})
+        if not cleaned:
+            return Err(SdkError("没有有效的节次时间"))
+        cleaned.sort(key=lambda x: x["period_no"])
         if semester_id:
             sid = int(semester_id)
         else:
@@ -275,5 +310,6 @@ class ManageRouter(PluginRouter):
             if not sem:
                 return Err(SdkError("没有当前学期"))
             sid = sem["id"]
-        n = await self.repo.set_period_times(sid, periods)
-        return Ok({"updated": n, "semester_id": sid})
+        n = await self.repo.set_period_times(sid, cleaned)
+        self.logger.info("节次作息已更新: 学期 {} 共 {} 节", sid, n)
+        return Ok({"updated": n, "semester_id": sid, "periods": cleaned})

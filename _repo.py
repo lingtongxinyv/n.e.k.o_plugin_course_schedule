@@ -102,6 +102,118 @@ class ScheduleRepo:
             await session.commit()
         return len(periods)
 
+    # ── 批量导入（单事务，避免每课每节各开一个 session 导致导入卡顿） ──
+    async def import_courses_bulk(
+        self, *, semester_id: int, courses: list[dict]
+    ) -> tuple[list[dict], int, int, int]:
+        """courses: [{name, code, teacher, location, color, note, sessions:[{weekday,period_no,weeks,note}]}]
+
+        幂等：同学期同名课程复用（并补全 teacher/location），重复上课安排
+        (course_id, weekday, period_no, weeks) 跳过。
+        返回 (inserted_courses, created_sessions, skipped_sessions, updated_courses)。
+        """
+        inserted: list[dict] = []
+        created = 0
+        skipped = 0
+        updated = 0
+        sid = int(semester_id)
+        async with await self._session() as session:
+            # 预载已有课程（按名索引）与已有上课安排（去重集合）
+            cur = await session.execute(
+                "SELECT id, name, teacher, location FROM courses WHERE semester_id = ?",
+                (sid,),
+            )
+            existing_by_name: dict[str, dict] = {}
+            for r in cur.fetchall():
+                existing_by_name[r["name"]] = dict(r)
+            cur = await session.execute(
+                "SELECT cs.course_id, cs.weekday, cs.period_no, cs.weeks "
+                "FROM course_sessions cs JOIN courses c ON c.id = cs.course_id "
+                "WHERE c.semester_id = ?",
+                (sid,),
+            )
+            existing_sessions: set[tuple] = {
+                (int(r["course_id"]), int(r["weekday"]), int(r["period_no"]), r["weeks"] or "")
+                for r in cur.fetchall()
+            }
+
+            for cd in courses:
+                name = (cd.get("name") or "").strip()
+                if not name:
+                    continue
+                teacher = cd.get("teacher") or None
+                location = cd.get("location") or None
+                exist = existing_by_name.get(name)
+                if exist is not None:
+                    # 同名课程复用；补全缺失的 teacher/location
+                    cid = int(exist["id"])
+                    merge_fields: dict[str, str] = {}
+                    if teacher and not exist.get("teacher"):
+                        merge_fields["teacher"] = teacher
+                    if location and not exist.get("location"):
+                        merge_fields["location"] = location
+                    if merge_fields:
+                        sets = ", ".join(f"{k} = ?" for k in merge_fields)
+                        await session.execute(
+                            f"UPDATE courses SET {sets} WHERE id = ?",
+                            (*merge_fields.values(), cid),
+                        )
+                        exist.update(merge_fields)
+                    updated += 1
+                else:
+                    cur = await session.execute(
+                        "INSERT INTO courses (semester_id, name, code, teacher, location, color, note) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            sid,
+                            name,
+                            cd.get("code") or None,
+                            teacher,
+                            location,
+                            cd.get("color") or None,
+                            cd.get("note") or None,
+                        ),
+                    )
+                    cid = int(cur.lastrowid)
+                    existing_by_name[name] = {"id": cid, "name": name, "teacher": teacher, "location": location}
+                    inserted.append(
+                        {
+                            "id": cid,
+                            "semester_id": sid,
+                            "name": name,
+                            "code": cd.get("code") or None,
+                            "teacher": teacher,
+                            "location": location,
+                            "color": cd.get("color") or None,
+                            "note": cd.get("note") or None,
+                        }
+                    )
+                for s in cd.get("sessions", []) or []:
+                    wd = s.get("weekday")
+                    pno = s.get("period_no")
+                    try:
+                        wd_i, pno_i = int(wd), int(pno)
+                    except (TypeError, ValueError):
+                        skipped += 1
+                        continue
+                    if not (1 <= wd_i <= 7) or pno_i < 1:
+                        skipped += 1
+                        continue
+                    wj = weeks_to_json(s.get("weeks")) or ""
+                    dedup_key = (cid, wd_i, pno_i, wj)
+                    if dedup_key in existing_sessions:
+                        skipped += 1
+                        continue
+                    await session.execute(
+                        "INSERT INTO course_sessions (course_id, weekday, period_no, weeks, note) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (cid, wd_i, pno_i, wj or None, s.get("note")),
+                    )
+                    existing_sessions.add(dedup_key)
+                    created += 1
+            await session.commit()
+        return inserted, created, skipped, updated
+
     # ── 课程 ──
     async def add_course(
         self, *, semester_id, name, code=None, teacher=None, location=None, color=None, note=None
