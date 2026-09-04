@@ -450,8 +450,10 @@ def _split_teacher(text: str) -> tuple[str, str | None]:
     thits = [(t, n, tc) for t, n, tc in valid_cands if any(tc.endswith(s) for s in _TEACHER_SUFFIXES)]
     if thits:
         def _score(x):
-            if x[0] == 3: return (3, len(x[1]))
-            if x[0] == 4: return (2, len(x[1]))
+            if x[0] == 3:
+                return (3, len(x[1]))
+            if x[0] == 4:
+                return (2, len(x[1]))
             return (1, len(x[1]))
         thits.sort(key=_score, reverse=True)
         return thits[0][1], thits[0][2]
@@ -632,11 +634,6 @@ def _parse_course_cell(cell: str) -> list[dict]:
                 period_end = pe
                 break
         periods_for_week.append(matched_pstr)
-        # 下一个 anchor 的 seg_boundary 之前 的字符位置（或 cell 末尾）
-        if i + 1 < len(week_anchors):
-            next_seg = week_anchors[i + 1][0]
-        else:
-            next_seg = len(cell)
         week_anchors_with_end.append((seg_boundary, week_end, period_end, weeks_str, matched_pstr))
 
     N = len(week_anchors_with_end)
@@ -883,9 +880,7 @@ def _extract_periods_from_row(row: list[str], period_col: int | None) -> list[in
         if seg in text:
             for cn_char in _CN_NUM_PERIOD_MAP:
                 if cn_char in text:
-                    idx_in_seg = _CN_NUM_PERIOD_MAP[cn_char]  # 1..5
-                    # 例如上午 + "一" = 第 1-2 节（offset=0 → 0*2+1=1），上午+"二"=offset=0+(2-1)*2+1=3
-                    # 更简单：按单独找到的 cn 字符本身 double
+                    # 按单独找到的 cn 字符本身 double（如 上午+“一” = 第 1-2 节）
                     dp = _cn_period_to_double(cn_char)
                     if dp:
                         return dp
