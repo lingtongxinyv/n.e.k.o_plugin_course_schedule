@@ -11,7 +11,9 @@
 | 📅 学期管理 | 创建多个学期，自动种入默认节次作息，随时切换 |
 | 📚 课程录入 | 手动录入，或从 **Excel / JSON / CSV / ICS** 文件一键导入 |
 | 🎓 教务系统同步 | 喜鹊儿 / 青果教务一键拉取课表（纯 Python DES 加密，零外部依赖） |
-| 📊 智能表格解析 | 自动识别两种课表布局：合并单元格模式 + split-rows 纵向堆叠模式，**紧急垃圾过滤器**精准拦截人名/节次/地点混入课程名的常见错乱 |
+| 📊 智能表格解析 | .xlsx / .xls（含教务系统常见的 HTML 伪 xls）**合并单元格自动展开**（EasyExcel 语义），双课表布局识别 + 垃圾过滤器防错乱 |
+| 🔁 幂等导入 | 同名课程自动复用、相同课时自动去重，重复导入不产生重复数据 |
+| ⏱ 上课时间自定义 | 每节课起止时间按学期自定义（上午/下午/晚上分段），周课表角标与上课提醒同步生效 |
 | ⏰ 上课提醒 | 自动检查即将开始的课程，提前 N 分钟推送通知 |
 | 📝 作业 / 📋 考试 | 截止日期、关联课程、完成标记、逾期自动识别 |
 | 🤖 AI 对话 | 自然语言查询今日课表、下节课、周数进度 |
@@ -34,7 +36,7 @@
 
 ```bash
 # 克隆插件仓库
-git clone https://github.com/lingtongxinyv/n.e.k.o_plugin_course_schedule_plugin.git
+git clone https://github.com/lingtongxinyv/n.e.k.o_plugin_course_schedule.git
 
 # 将整个目录复制到 N.E.K.O 插件目录下
 # Windows:
@@ -140,8 +142,9 @@ git push origin v0.2.1
 course_schedule/
 ├── plugin.toml              ← 插件配置（Market 读取）
 ├── __init__.py              ← 主插件：初始化数据库、注册 routers
-├── _matrix_parser.py        ← 矩阵级表格解析器（v3 重写，支持 split-rows）
-├── _xlsx_parser.py          ← xlsx / 假 xls (HTML) 解析
+├── _matrix_parser.py        ← 矩阵级表格解析器（双布局识别 + 垃圾过滤）
+├── _xls_parser.py           ← xls (BIFF8) / HTML 伪 xls 解析，合并单元格展开
+├── _xlsx_parser.py          ← xlsx 解析（含 mergeCell 展开）
 ├── _repo.py                 ← 数据库访问层（aiosqlite）
 ├── _schema.py               ← SQLite schema
 ├── _time.py                 ← 时间工具（周数、节次、星期）
